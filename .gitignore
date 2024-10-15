@@ -1,0 +1,11 @@
+# ignore python and jupyter cache files
+__pycache__
+.DS_Store
+.ipynb_checkpoints
+
+# ignore .egg-info directories
+*.egg-info/
+
+# ignore pytorch cache files
+.cache/
+
