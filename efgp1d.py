@@ -1,172 +1,119 @@
 import torch
-import math
-from typing import Callable, Tuple, Dict, Optional
-from cg import ConjugateGradients
+from typing import Dict, Optional, Callable
 from utils.kernels import get_xis
-from utils.kernels import GetTruncationBound
+from cg import ConjugateGradients
 
-def EFGP(x: torch.Tensor, meas: torch.Tensor, sigmasq: float, ker: Dict[str, Callable],
-         xtrg: Optional[torch.Tensor] = None, opts: Optional[Dict] = None) -> Tuple[Dict, Dict, Dict]:
+def compute_convolution_vector_vectorized(m: int, x: torch.Tensor, h: float) -> torch.Tensor:
     """
-    Perform GP regression via equispaced Fourier iterative method in 1D.
-
+    Vectorized implementation of compute_convolution_vector
     Args:
-    x (torch.Tensor): Points where observations are taken, shape (N,)
-    meas (torch.Tensor): Observations at the data points, shape (N,)
-    sigmasq (float): Noise variance at data points
-    ker (Dict[str, Callable]): Covariance kernel info with at least 'khat' field
-    xtrg (torch.Tensor, optional): Target points for prediction, shape (n,)
-    opts (Dict, optional): Options controlling method params
-
+        m (int): Half number of nodes (mtot = 2m + 1)
+        x (torch.Tensor): Input points
+        h (float): Grid spacing
     Returns:
-    Tuple[Dict, Dict, Dict]: y (results at data points), ytrg (results at targets), info (diagnostics)
+        torch.Tensor: Convolution vector of shape (4m+1,)
     """
-    if opts is None:
-        opts = {}
-    
-    tol = opts.get('tol', 1e-6)
-    
-    # Determine problem dimension and sizes
-    N = x.shape[0]
-    do_trg = xtrg is not None
-    n = xtrg.shape[0] if do_trg else 0
-    
-    # Combine x and xtrg for timing purposes
-    xsol = torch.cat([x, xtrg]) if do_trg else x
-    
-    # Call the core 1D EFGP function
-    beta, xis, yhat, iter_info, cpu_time, ws = efgp1d(x, meas, sigmasq, ker, tol, xsol, opts)
-    
-    # Extract results
-    if 'only_trgs' in opts:
-        y = {'mean': torch.tensor([])}
-        ytrg = {'mean': yhat.mean}
-    else:
-        y = {'mean': yhat.mean[:N]}
-        ytrg = {'mean': yhat.mean[N:]}
-    
-    # Prepare info dict
-    info = {
-        'beta': beta,
-        'xis': xis,
-        'h': xis[1] - xis[0],
-        'ximax': torch.max(xis),
-        'iter': iter_info,
-        'cpu_time': {
-            'total': cpu_time[3],
-            'precomp': cpu_time[0],
-            'cg': cpu_time[1],
-            'mean': cpu_time[2]
-        }
-    }
-    
-    return y, ytrg, info
+    j_indices = torch.arange(-2*m, 2*m + 1).to(dtype=torch.complex128) # j = -2m, ..., 2m
+    exponents = 2 * torch.pi * 1j * h * torch.outer(j_indices, x).to(dtype=torch.complex128)
+    v = torch.sum(torch.exp(exponents), dim=1).conj()
+    # TODO: the final conjugation was necessary to make everything match, but I am not sure it matches the equation
+    return v, j_indices
 
-def efgp1d(inputs: torch.Tensor, y: torch.Tensor, sigmasq: float, ker: Dict[str, Callable],
-           eps: float, xtrgs: torch.Tensor, opts: Optional[Dict] = None) -> Tuple:
+class FFTConv1d:
+    def __init__(self, v, b):
+        self.v = v
+        self.b = b
+        self.len_v = len(v)
+        self.len_b = len(b)
+        self.conv_length = self.len_v + self.len_b - 1  # Full convolution length
+        self.valid_length = self.len_v - self.len_b + 1  # = 4m+1 - (2m+1) + 1 = 2m + 1
+        self.start = self.len_b - 1  # = 2m + 1 - 1 = 2m
+        self.end = self.start + self.valid_length  # = 2m + 2m + 1 = 4m + 1
+
+    def pad_right(self):
+        # Find next power of two for efficient FFT computation
+        fft_length = 1 << (self.conv_length - 1).bit_length()
+        # Pad signals to fft_length (padding with zeros at the right)
+        v_padded = torch.nn.functional.pad(self.v, (0, fft_length - self.len_v))
+        b_padded = torch.nn.functional.pad(self.b, (0, fft_length - self.len_b))
+        return v_padded, b_padded
+
+    def fft_multiply_ifft(self, v_padded, b_padded):
+        # Compute FFTs of padded signals
+        V = torch.fft.fft(v_padded)
+        B = torch.fft.fft(b_padded)
+        # Multiply in the frequency domain
+        conv_fft = V * B
+        # Compute inverse FFT to get convolution result
+        return torch.fft.ifft(conv_fft)
+
+    def extract_valid(self, conv_result_full):
+        # Extract the valid part of the convolution result
+        return conv_result_full[self.start:self.end]  # = conv_result_full[2m:4m+1]
+
+    def __call__(self):
+        v_padded, b_padded = self.pad_right()
+        conv_result_full = self.fft_multiply_ifft(v_padded, b_padded)
+        return self.extract_valid(conv_result_full)
+
+def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, Callable], eps: float, x_new: torch.Tensor, opts: Optional[Dict] = None):
     """
-    Fast equispaced Fourier NUFFT-based GP regression in 1D.
-
-    Args:
-    inputs (torch.Tensor): Location of observations, shape (N,)
-    y (torch.Tensor): Observations, shape (N,)
-    sigmasq (float): Residual variance for GP regression
-    ker (Dict[str, Callable]): Kernel info with 'khat' as Fourier transform
-    eps (float): Truncation tolerance for covariance kernel
-    xtrgs (torch.Tensor): Locations at which to evaluate posterior mean, shape (n,)
-    opts (Dict, optional): Options controlling method params
-
-    Returns:
-    Tuple: beta, xis, ytrg, iter_info, time_info, ws
+    Fast equispaced Fourier GP regression in 1D.
+    Difference from efgp1d_dense is that this version does not use the dense solve, but rather a convolution + CG.
     """
-    if opts is None:
-        opts = {}
-    
-    # Timer for precomputation
-    t_precomp_start = torch.cuda.Event(enable_timing=True)
-    t_precomp_end = torch.cuda.Event(enable_timing=True)
-    t_precomp_start.record()
-    
-    # Determine problem geometry
-    N = inputs.shape[0]
-    x0, x1 = torch.min(torch.cat([inputs, xtrgs])), torch.max(torch.cat([inputs, xtrgs]))
+
+    # Send x, y, x_new to double precision, real dtype
+    x = x.to(dtype=torch.float64)
+    y = y.to(dtype=torch.float64)
+    x_new = x_new.to(dtype=torch.float64)
+
+    # Get problem geometry
+    x0, x1 = torch.min(torch.cat([x, x_new])), torch.max(torch.cat([x, x_new]))
     L = x1 - x0
-    
-    # Get Fourier nodes (assuming a function similar to get_xis is implemented)
-    xis, h, mtot = get_xis(kernel_obj=ker, eps=eps, L=L, use_integral=opts.get('use_integral', False), l2scaled=opts.get('l2scaled', False))
-    
-    # Center and scale coordinates
-    xcen = (x1 + x0) / 2
-    tphx = 2 * math.pi * h * (inputs - xcen)
-    tphxtrgs = 2 * math.pi * h * (xtrgs - xcen)
-    
-    # Compute weights for Fourier basis functions
-    khat = ker['khat']
-    ws = torch.sqrt(khat(xis) * h)
-    
-    # Construct first row and column of Toeplitz matrix
-    c = torch.ones(N, dtype=torch.complex64)
-    XtXcol = torch.fft.fft(c, n=2*mtot-1)
-    Gf = torch.fft.fft(XtXcol)
-    
-    # Construct right-hand side
-    rhs = torch.fft.fft(y, n=mtot)
-    rhs = ws * rhs
-    
-    t_precomp_end.record()
-    torch.cuda.synchronize()
-    t_precomp = t_precomp_start.elapsed_time(t_precomp_end) / 1000  # Convert to seconds
-    
-    # Define matrix-vector product function for CG
-    def Afun(a):
-        return ws * Afun2(Gf, ws * a) + sigmasq * a
-    
-    # Solve linear system with conjugate gradient
-    cg_tol = eps / opts.get('cg_tol_fac', 1)
-    t_cg_start = torch.cuda.Event(enable_timing=True)
-    t_cg_end = torch.cuda.Event(enable_timing=True)
-    t_cg_start.record()
-    
-    cg_solver = ConjugateGradients(Afun, rhs, torch.zeros_like(rhs), tol=cg_tol, max_iter=3*mtot)
-    beta = cg_solver.solve()
-    iter_info = cg_solver.iters_completed
-    
-    t_cg_end.record()
-    torch.cuda.synchronize()
-    t_cg = t_cg_start.elapsed_time(t_cg_end) / 1000  # Convert to seconds
-    
-    # Evaluate solution at target points
-    t_post_start = torch.cuda.Event(enable_timing=True)
-    t_post_end = torch.cuda.Event(enable_timing=True)
-    t_post_start.record()
-    
-    tmpvec = ws * beta
-    yhat = torch.fft.ifft(tmpvec, n=xtrgs.shape[0])
-    ytrg = {'mean': yhat.real}
-    
-    t_post_end.record()
-    torch.cuda.synchronize()
-    t_post = t_post_start.elapsed_time(t_post_end) / 1000  # Convert to seconds
-    
-    # Prepare timing info
-    time_info = torch.tensor([t_precomp, t_cg, t_post])
-    time_info = torch.cat([time_info, time_info.sum().unsqueeze(0)])
-    
-    return beta, xis, ytrg, iter_info, time_info, ws
+    N = x.shape[0]
 
-def Afun2(Gf: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
-    """
-    Perform fast multiply by Toeplitz matrix for conjugate gradient.
+    # Get Fourier frequencies and weights
+    xis, h, mtot = get_xis(kernel, eps, L)  # assume this exists and returns tensors
+    ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=torch.complex128) * h)
 
-    Args:
-    Gf (torch.Tensor): FFT of first column of Toeplitz matrix
-    a (torch.Tensor): Input vector
+    F = torch.exp(1j * 2 * torch.pi * torch.outer(x, xis)).to(dtype=torch.complex128)
 
-    Returns:
-    torch.Tensor: Result of matrix-vector product
-    """
-    mtot = a.shape[0]
-    af = torch.fft.fft(a, n=Gf.shape[0])
-    vft = af * Gf
-    vft = torch.fft.ifft(vft)
-    return vft[:mtot]
+    # Compute the right hand side (expensive, materializing F which is M X N)
+    # paper does it via NUFFT
+    right_hand_side = ws * (F.adjoint() @ y.to(dtype=torch.complex128))
+
+    # Construct the convolution vector v
+    # In the original work, this was done using NUFFT, but here we do it manually
+    # we can also do it via taking the first row and column of F^* F (see discrete_convolution_tests.ipynb)
+    v, j_indices = compute_convolution_vector_vectorized(m=int((mtot - 1) / 2), x=x, h=h)
+
+    ##### solve linear system (DF^*FD + sigma^2)beta = rhs with the conjugate gradients method #####
+    
+    # define the application of the operator A to a vector (more efficient than materializing A and multiplying)
+    # where we multiply elementwise by ws instead of using the diagonal matrix D 
+    Afun = lambda beta: ws @ FFTConv1d(v, ws * beta)() + sigmasq * beta
+
+    # the tensor version, which is less efficient, but for debugging (Afun = A)
+
+
+    # Call conjugate gradients
+    cg_object = ConjugateGradients(A_apply_function=Afun, b=right_hand_side, x0=torch.zeros_like(right_hand_side))
+    
+    beta = cg_object.solve()
+
+    # Evaluate the posterior mean at the new points
+    Phi_target = torch.exp(1j * 2 * torch.pi * torch.outer(x_new, xis)) # @ torch.diag(ws)
+    yhat = Phi_target @ beta
+
+    ytrg = {'mean': torch.real(yhat)}
+
+    # Optionally compute posterior variance
+    if opts is not None and opts.get('get_var', False):
+        # TODO: implement this later
+        ytrg['var'] = None
+
+    # returning just part of the args
+    return beta, xis, ytrg
+
+
+
