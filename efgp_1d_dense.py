@@ -1,5 +1,6 @@
 import torch
 from utils.kernels import get_xis
+from cg import ConjugateGradients
 
 # TODO: remove the opts dict in favor of args.
 def efgp1d_dense(x, y, sigmasq, kernel, eps, x_new, opts=None):
@@ -33,7 +34,7 @@ def efgp1d_dense(x, y, sigmasq, kernel, eps, x_new, opts=None):
     N = x.shape[0]
     
     # Get Fourier frequencies and weights
-    xis, h, mtot = get_xis(kernel, eps, L)  # assume this exists and returns tensors
+    xis, h, mtot = get_xis(kernel, eps, L)
     ws = torch.sqrt(kernel.spectral_density(xis) * h)
     
     # Form design matrix F and system matrix A
@@ -41,12 +42,17 @@ def efgp1d_dense(x, y, sigmasq, kernel, eps, x_new, opts=None):
     D = torch.diag(ws).to(dtype=torch.complex128) # complex dtype
     A = D @ (torch.conj(F).T @ F) @ D
     
-    # Solve linear system for beta
-    rhs = D @ torch.conj(F).T @ y.to(dtype=torch.complex128) # y to complex dtype
+    # Construct right-hand side
+    rhs = D @ torch.conj(F).T @ y.to(dtype=torch.complex128) # y to complex dtype temporarily
     
     # Solve using Cholesky factorization
-    chol_factor = torch.linalg.cholesky(A + sigmasq * torch.eye(mtot, dtype=A.dtype))
-    beta = torch.cholesky_solve(rhs.unsqueeze(-1), chol_factor).squeeze(-1)
+    if opts is not None and opts.get('method') == "cholesky":
+        chol_factor = torch.linalg.cholesky(A + sigmasq * torch.eye(mtot, dtype=A.dtype))
+        beta = torch.cholesky_solve(rhs.unsqueeze(-1), chol_factor).squeeze(-1)
+    else:
+        # Solve using conjugate gradients
+        cg_object = ConjugateGradients(A_apply_function=A + sigmasq * torch.eye(mtot, dtype=A.dtype), b=rhs, x0=torch.zeros_like(rhs))
+        beta = cg_object.solve()
     
     # Evaluate posterior mean at target points
     Phi_target = torch.exp(1j * 2 * torch.pi * torch.outer(x_new, xis)) @ D
