@@ -2,6 +2,7 @@ import torch
 from typing import Dict, Optional, Callable
 from utils.kernels import get_xis
 from cg import ConjugateGradients
+import time
 
 def compute_convolution_vector_vectorized(m: int, x: torch.Tensor, h: float) -> torch.Tensor:
     """
@@ -75,37 +76,48 @@ def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, C
     # Get Fourier frequencies and weights
     xis, h, mtot = get_xis(kernel, eps, L)  # assume this exists and returns tensors
     ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=torch.complex128) * h)
+    D = torch.diag(ws)
 
-    F = torch.exp(1j * 2 * torch.pi * torch.outer(x, xis)).to(dtype=torch.complex128)
-
+    ##### compute the right hand side #####
     # Compute the right hand side (expensive, materializing F which is M X N)
     # paper does it via NUFFT
-    right_hand_side = ws * (F.adjoint() @ y.to(dtype=torch.complex128))
+    start_time = time.time()
+    F = torch.exp(1j * 2 * torch.pi * torch.outer(x, xis)).to(dtype=torch.complex128)
+    right_hand_side = D @ (F.adjoint() @ y.to(dtype=torch.complex128))
+    rhs_time = time.time() - start_time
 
-    # Construct the convolution vector v
+    ##### construct the convolution vector v #####
     # In the original work, this was done using NUFFT, but here we do it manually
     # we can also do it via taking the first row and column of F^* F (see discrete_convolution_tests.ipynb)
+    start_time = time.time()
     v, j_indices = compute_convolution_vector_vectorized(m=int((mtot - 1) / 2), x=x, h=h)
+    conv_vector_time = time.time() - start_time
 
     ##### solve linear system (DF^*FD + sigma^2)beta = rhs with the conjugate gradients method #####
     
     # define the application of the operator A to a vector (more efficient than materializing A and multiplying)
     # where we multiply elementwise by ws instead of using the diagonal matrix D 
-    Afun = lambda beta: ws @ FFTConv1d(v, ws * beta)() + sigmasq * beta
-
-    # the tensor version, which is less efficient, but for debugging (Afun = A)
-
+    Afun = lambda beta: D @ FFTConv1d(v, D @ beta)() + sigmasq * beta
 
     # Call conjugate gradients
     cg_object = ConjugateGradients(A_apply_function=Afun, b=right_hand_side, x0=torch.zeros_like(right_hand_side))
     
-    beta = cg_object.solve()
+    start_time = time.time()
+    beta = cg_object.solve() # beta is the solution to the linear system
+    solve_time = time.time() - start_time
 
     # Evaluate the posterior mean at the new points
-    Phi_target = torch.exp(1j * 2 * torch.pi * torch.outer(x_new, xis)) # @ torch.diag(ws)
+    # The paper also uses nuFFT here, but we do it manually for now
+    Phi_target = torch.exp(1j * 2 * torch.pi * torch.outer(x_new, xis)) @ D
     yhat = Phi_target @ beta
 
     ytrg = {'mean': torch.real(yhat)}
+    
+    timing_results = {
+        'rhs_time': rhs_time,
+        'construct_system_time': conv_vector_time,
+        'solve_time': solve_time
+    }
 
     # Optionally compute posterior variance
     if opts is not None and opts.get('get_var', False):
@@ -113,7 +125,7 @@ def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, C
         ytrg['var'] = None
 
     # returning just part of the args
-    return beta, xis, ytrg
+    return beta, xis, ytrg, timing_results
 
 
 
