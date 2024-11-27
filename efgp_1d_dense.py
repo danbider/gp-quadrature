@@ -1,6 +1,7 @@
 import torch
 from utils.kernels import get_xis
 from cg import ConjugateGradients
+import time
 
 # TODO: remove the opts dict in favor of args.
 def efgp1d_dense(x, y, sigmasq, kernel, eps, x_new, opts=None):
@@ -36,29 +37,43 @@ def efgp1d_dense(x, y, sigmasq, kernel, eps, x_new, opts=None):
     # Get Fourier frequencies and weights
     xis, h, mtot = get_xis(kernel, eps, L)
     ws = torch.sqrt(kernel.spectral_density(xis) * h)
-    
-    # Form design matrix F and system matrix A
-    F = torch.exp(1j * 2 * torch.pi * torch.outer(x, xis)).to(dtype=torch.complex128)
     D = torch.diag(ws).to(dtype=torch.complex128) # complex dtype
-    A = D @ (torch.conj(F).T @ F) @ D
-    
+
+    start_time = time.time()
+    # Form design features F 
+    F = torch.exp(1j * 2 * torch.pi * torch.outer(x, xis)).to(dtype=torch.complex128)
+
     # Construct right-hand side
     rhs = D @ torch.conj(F).T @ y.to(dtype=torch.complex128) # y to complex dtype temporarily
+    rhs_time = time.time() - start_time
     
-    # Solve using Cholesky factorization
+    # Form system matrix A
+    start_time = time.time()
+    A = D @ (torch.conj(F).T @ F) @ D
+    construct_system_time = time.time() - start_time
+    # Solve the linear system
+    start_time = time.time()
     if opts is not None and opts.get('method') == "cholesky":
+        # Solve using Cholesky factorization
         chol_factor = torch.linalg.cholesky(A + sigmasq * torch.eye(mtot, dtype=A.dtype))
         beta = torch.cholesky_solve(rhs.unsqueeze(-1), chol_factor).squeeze(-1)
     else:
         # Solve using conjugate gradients
         cg_object = ConjugateGradients(A_apply_function=A + sigmasq * torch.eye(mtot, dtype=A.dtype), b=rhs, x0=torch.zeros_like(rhs))
         beta = cg_object.solve()
-    
+    solve_time = time.time() - start_time
+
     # Evaluate posterior mean at target points
     Phi_target = torch.exp(1j * 2 * torch.pi * torch.outer(x_new, xis)) @ D
     yhat = Phi_target @ beta
     
     ytrg = {'mean': torch.real(yhat)}
+
+    timing_results = {
+        'rhs_time': rhs_time,
+        'construct_system_time': construct_system_time,
+        'solve_time': solve_time
+    }
     
     # Optionally compute posterior variance
     if opts is not None and opts.get('get_var', False):
@@ -68,4 +83,4 @@ def efgp1d_dense(x, y, sigmasq, kernel, eps, x_new, opts=None):
         Phi_target = torch.exp(1j * 2 * torch.pi * torch.outer(x_new, xis)) @ D
         ytrg['var'] = torch.real(torch.diagonal(Phi_target @ c_inv @ Phi_target.T.conj()))
     
-    return beta, xis, ytrg, A, F, ws
+    return beta, xis, ytrg, A, F, ws, timing_results
