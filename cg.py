@@ -26,8 +26,14 @@ class ConjugateGradients:
             self.A_apply_function = A_apply_function
         else:
             raise ValueError("A_apply_function must be a torch.Tensor or a callable")
-        self.b = b.to(dtype=torch.complex128)
-        self.x0 = x0.to(dtype=torch.complex128)
+        if isinstance(A_apply_function, torch.Tensor):
+            dtype = A_apply_function.dtype
+        else:
+            dtype = torch.complex128 # for the FFTs in the complex case
+        
+        print(f"Using {dtype} precision for CG matrix-vector products!")
+        self.b = b.to(dtype=dtype)
+        self.x0 = x0.to(dtype=dtype)
         self.tol = tol
         self.max_iter = max_iter
         self.early_stopping = early_stopping
