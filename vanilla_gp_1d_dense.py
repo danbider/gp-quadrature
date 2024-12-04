@@ -65,4 +65,12 @@ def vanilla_gp_dense(x, y, sigmasq, kernel, x_new, opts=None):
         # tilde_K = kernel.kernel(diff_matrix_new)
         # ytrg['var'] = torch.real(torch.diagonal(tilde_K @ c_inv @ tilde_K.T.conj()))
     
+    # Optionally compute log marginal likelihood at training locations
+    if opts is not None and opts.get('get_log_marginal_likelihood', False):
+        # recall that (K + sigma^2 I)^{-1} y = alpha as computed above
+        log_marg_lik = -0.5 * y.T @ alpha - 0.5 * torch.logdet(K_plus_sigma_sq) - 0.5 * N * torch.log(2 * torch.tensor(torch.pi, dtype=torch.float64))
+        ytrg['log_marginal_likelihood'] = log_marg_lik
+
+        # gradient of log_marginal_likelihood w.r.t all parameters
+    
     return alpha, ytrg, timing_results

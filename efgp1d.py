@@ -123,6 +123,13 @@ def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, C
     if opts is not None and opts.get('get_var', False):
         # TODO: implement this later
         ytrg['var'] = None
+    
+    # # Optionally compute log marginal likelihood at training locations
+    if opts is not None and opts.get('get_log_marginal_likelihood', False):
+        logdet = N*torch.log(sigmasq) + torch.logdet((D @ F.adjoint() @ F @ D)/sigmasq + torch.eye(mtot, dtype=torch.float64)).to(dtype=torch.float64)
+        alpha = (1/sigmasq) * (y - torch.real(F @ D @ beta))
+        log_marg_lik = -0.5 * y.T @ alpha - 0.5 * logdet - 0.5 * N * torch.log(2 * torch.tensor(torch.pi, dtype=torch.float64))
+        ytrg['log_marginal_likelihood'] = log_marg_lik # TODO: this shouldn't be in ytrg, fix later
 
     # returning just part of the args
     return beta, xis, ytrg, timing_results
