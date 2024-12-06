@@ -5,7 +5,7 @@ from kernels.squared_exponential import SquaredExponential
 
 import math
 class GetTruncationBound:
-    def __init__(self, eps: float, kern: callable, initial_upper_bound: float = 1000.0, initial_lower_bound: float = 0.0, max_iterations: int = 200):
+    def __init__(self, eps: float, kern: callable, initial_upper_bound: float = 1000.0, initial_lower_bound: float = 0.0, max_iterations: int = 200, dtype: torch.dtype = torch.float64):
         r"""
         Initialize the GetTruncationBound class with hyperparameters.
         We want to find $L$ such that $f(L) \approx \epsilon$, where $f$ is a monotonically decreasing function.
@@ -16,12 +16,14 @@ class GetTruncationBound:
         initial_upper_bound (float): Initial upper bound for the search
         initial_lower_bound (float): Initial lower bound for the search
         max_iterations (int): Maximum number of iterations for bisection
+        dtype (torch.dtype): Precision to use for computations (default: torch.float64)
         """
         self.eps = eps
         self.kern = kern
         self.initial_upper_bound = initial_upper_bound
         self.initial_lower_bound = initial_lower_bound
         self.max_iterations = max_iterations
+        self.dtype = dtype
     
     def find_upper_bound_for_bisection(self) -> float:
         """
@@ -35,7 +37,7 @@ class GetTruncationBound:
         nmax = 10
 
         for _ in range(nmax):
-            if self.kern(torch.tensor(b)) > self.eps: # function value at b is greater than eps
+            if self.kern(torch.tensor(b, device='cpu', dtype=self.dtype)) > self.eps: # function value at b is greater than eps
                 b *= 2 # double the upper bound
             else:
                 break # if function value at b is less than eps, we have found a valid upper bound
@@ -57,7 +59,7 @@ class GetTruncationBound:
             # compute the input midpoint
             mid = (a + b) / 2
             # compute the function value at the input midpoint
-            fmid = self.kern(torch.tensor(mid))
+            fmid = self.kern(torch.tensor(mid, device='cpu', dtype=self.dtype))
             # if the function value at the input midpoint is greater than eps, we need to search the right half
             if fmid > self.eps:
                 a = mid
@@ -67,7 +69,7 @@ class GetTruncationBound:
         return mid
     
 
-def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, use_integral: bool = False, l2scaled: bool = False) -> Tuple[torch.Tensor, float, int]:
+def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, use_integral: bool = False, l2scaled: bool = False, dtype: torch.dtype = torch.float64) -> Tuple[torch.Tensor, float, int]:
     """
     Return 1D equispaced Fourier quadrature nodes for given tolerance.
 
@@ -77,6 +79,7 @@ def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, u
     L (float): Max size of spatial domain in any coordinate
     use_integral (bool): Whether to use integral method for truncation bound
     l2scaled (bool): Whether to use L2 scaling
+    dtype (torch.dtype): Precision to use for computations (default: torch.float64)
 
     Returns:
     Tuple[torch.Tensor, float, int]: xis, h, mtot
@@ -87,13 +90,13 @@ def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, u
     eps_use = eps
     
     if use_integral:
-        truncation_bound = GetTruncationBound(eps, kernel_obj.kernel)
+        truncation_bound = GetTruncationBound(eps, kernel_obj.kernel, dtype=dtype)
         Ltime = truncation_bound.find_truncation_bound()  # find eps-support
         h_spacing = 1 / (L + Ltime)  # xi node spacing so nearest aliased tail <= eps
         
         # Fourier radial ker func
-        khat_modified = lambda r: abs(r**(dim-1)) * kernel_obj.spectral_density(r) / kernel_obj.spectral_density(torch.tensor(0))  # polar factor & rel to 0
-        truncation_bound_freq = GetTruncationBound(eps, khat_modified)
+        khat_modified = lambda r: abs(r**(dim-1)) * kernel_obj.spectral_density(r) / kernel_obj.spectral_density(torch.tensor(0, device='cpu', dtype=dtype))  # polar factor & rel to 0
+        truncation_bound_freq = GetTruncationBound(eps, khat_modified, dtype=dtype)
         Lfreq = truncation_bound_freq.find_truncation_bound()  # find eps-support
         
         hm = math.ceil(Lfreq / h_spacing)  # half number of nodes to cover [-Lfreq,Lfreq]
@@ -105,7 +108,7 @@ def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, u
             eps_use = eps / kernel_obj.variance
             if l2scaled:
                 # L2 norm of the kernel k
-                rl2sq = ((2*nu/math.pi/l**2)**(dim/2) * kernel_obj.spectral_density(torch.tensor(0))**2 / 2 *
+                rl2sq = ((2*nu/math.pi/l**2)**(dim/2) * kernel_obj.spectral_density(torch.tensor(0, device='cpu', dtype=dtype))**2 / 2 *
                          math.gamma(dim/2+2*nu) / math.gamma(dim+2*nu) * 2**(-dim/2))
                 eps_use = eps * math.sqrt(rl2sq)
             
@@ -120,14 +123,14 @@ def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, u
             var = kernel_obj.variance
             eps_use = eps / var
             if l2scaled:
-                rl2sq = kernel_obj.kernel(torch.tensor(0))**2 * (math.sqrt(math.pi)*l**2)**dim
+                rl2sq = kernel_obj.kernel(torch.tensor(0, device='cpu', dtype=dtype))**2 * (math.sqrt(math.pi)*l**2)**dim
                 eps_use = eps * math.sqrt(rl2sq)
             
             eps = eps_use
             h_spacing = 1 / (L + l*math.sqrt(2*math.log(4*dim*3**dim/eps)))
             hm = math.ceil(math.sqrt(math.log(dim*(4**(dim+1))/eps)/2)/math.pi/l/h_spacing)  # again, the paper sometime uses "m"
     
-    xis = torch.arange(-hm, hm+1) * h_spacing  # use exactly h, so can get bit of spillover
+    xis = torch.arange(-hm, hm+1, device='cpu', dtype=dtype) * h_spacing  # use exactly h, so can get bit of spillover
     mtot = xis.numel()  # 2m+1
     
     return xis, h_spacing, mtot

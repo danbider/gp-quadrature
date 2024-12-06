@@ -3,6 +3,7 @@ from typing import Dict, Optional, Callable
 from utils.kernels import get_xis
 from cg import ConjugateGradients
 import time
+from torch.profiler import profile, record_function, ProfilerActivity
 
 def compute_convolution_vector_vectorized(m: int, x: torch.Tensor, h: float) -> torch.Tensor:
     """
@@ -14,7 +15,7 @@ def compute_convolution_vector_vectorized(m: int, x: torch.Tensor, h: float) -> 
     Returns:
         torch.Tensor: Convolution vector of shape (4m+1,)
     """
-    j_indices = torch.arange(-2*m, 2*m + 1).to(dtype=torch.complex128) # j = -2m, ..., 2m
+    j_indices = torch.arange(-2*m, 2*m + 1).to(dtype=torch.complex128, device=x.device) # j = -2m, ..., 2m
     exponents = 2 * torch.pi * 1j * h * torch.outer(j_indices, x).to(dtype=torch.complex128)
     v = torch.sum(torch.exp(exponents), dim=1).conj()
     # TODO: the final conjugation was necessary to make everything match, but I am not sure it matches the equation
@@ -57,82 +58,110 @@ class FFTConv1d:
         conv_result_full = self.fft_multiply_ifft(v_padded, b_padded)
         return self.extract_valid(conv_result_full)
 
-def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, Callable], eps: float, x_new: torch.Tensor, opts: Optional[Dict] = None):
+def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, Callable], eps: float, x_new: torch.Tensor, do_profiling: bool = True, opts: Optional[Dict] = None):
     """
     Fast equispaced Fourier GP regression in 1D.
     Difference from efgp1d_dense is that this version does not use the dense solve, but rather a convolution + CG.
     """
+    activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA] if do_profiling else []
+    with profile(activities=activities, record_shapes=True) as prof:    
 
-    # Send x, y, x_new to double precision, real dtype
-    x = x.to(dtype=torch.float64)
-    y = y.to(dtype=torch.float64)
-    x_new = x_new.to(dtype=torch.float64)
+        # Send x, y, x_new to double precision, real dtype
+        device = x.device
+        x = x.to(dtype=torch.float64)
+        y = y.to(dtype=torch.float64)
+        x_new = x_new.to(dtype=torch.float64)
 
-    # Get problem geometry
-    x0, x1 = torch.min(torch.cat([x, x_new])), torch.max(torch.cat([x, x_new]))
-    L = x1 - x0
-    N = x.shape[0]
+        # Get problem geometry
+        x0, x1 = torch.min(torch.cat([x, x_new])), torch.max(torch.cat([x, x_new]))
+        L = x1 - x0
+        N = x.shape[0]  
 
-    # Get Fourier frequencies and weights
-    xis, h, mtot = get_xis(kernel, eps, L)  # assume this exists and returns tensors
-    ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=torch.complex128) * h)
-    D = torch.diag(ws)
+        # Get Fourier frequencies and weights
+        xis, h, mtot = get_xis(kernel, eps, L.item())
+        print(f"Number of quadrature nodes: {mtot}")
+        xis = xis.to(device=device)
+        ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=torch.complex128, device=device) * h)
+        D = torch.diag(ws)
 
-    ##### compute the right hand side #####
-    # Compute the right hand side (expensive, materializing F which is M X N)
-    # paper does it via NUFFT
-    start_time = time.time()
-    F = torch.exp(1j * 2 * torch.pi * torch.outer(x, xis)).to(dtype=torch.complex128)
-    right_hand_side = D @ (F.adjoint() @ y.to(dtype=torch.complex128))
-    rhs_time = time.time() - start_time
+        ##### compute the right hand side #####
+        # Compute the right hand side (expensive, materializing F which is M X N)
+        # paper does it via NUFFT
+        with record_function("right_hand_side"):
+            F = torch.exp(1j * 2 * torch.pi * torch.outer(x, xis)).to(dtype=torch.complex128, device=device)
+            right_hand_side = D @ (F.adjoint() @ y.to(dtype=torch.complex128))
+        
 
-    ##### construct the convolution vector v #####
-    # In the original work, this was done using NUFFT, but here we do it manually
-    # we can also do it via taking the first row and column of F^* F (see discrete_convolution_tests.ipynb)
-    start_time = time.time()
-    v, j_indices = compute_convolution_vector_vectorized(m=int((mtot - 1) / 2), x=x, h=h)
-    conv_vector_time = time.time() - start_time
+        ##### construct the convolution vector v #####
+        # In the original work, this was done using NUFFT, but here we do it manually
+        # we can also do it via taking the first row and column of F^* F (see discrete_convolution_tests.ipynb)
+        with record_function("convolution_vector"):
+            v, j_indices = compute_convolution_vector_vectorized(m=int((mtot - 1) / 2), x=x, h=h)
 
-    ##### solve linear system (DF^*FD + sigma^2)beta = rhs with the conjugate gradients method #####
-    
-    # define the application of the operator A to a vector (more efficient than materializing A and multiplying)
-    # where we multiply elementwise by ws instead of using the diagonal matrix D 
-    Afun = lambda beta: D @ FFTConv1d(v, D @ beta)() + sigmasq * beta
 
-    # Call conjugate gradients
-    cg_object = ConjugateGradients(A_apply_function=Afun, b=right_hand_side, x0=torch.zeros_like(right_hand_side))
-    
-    start_time = time.time()
-    beta = cg_object.solve() # beta is the solution to the linear system
-    solve_time = time.time() - start_time
+        ##### solve linear system (DF^*FD + sigma^2)beta = rhs with the conjugate gradients method #####
+        
+        # define the application of the operator A to a vector (more efficient than materializing A and multiplying)
+        # where we multiply elementwise by ws instead of using the diagonal matrix D 
+        Afun = lambda beta: D @ FFTConv1d(v, D @ beta)() + sigmasq * beta
 
-    # Evaluate the posterior mean at the new points
-    # The paper also uses nuFFT here, but we do it manually for now
-    Phi_target = torch.exp(1j * 2 * torch.pi * torch.outer(x_new, xis)) @ D
-    yhat = Phi_target @ beta
+        # Call conjugate gradients
+        cg_object = ConjugateGradients(A_apply_function=Afun, b=right_hand_side, x0=torch.zeros_like(right_hand_side))
+        
+        with record_function("solve"):
+            beta = cg_object.solve() # beta is the solution to the linear system
 
-    ytrg = {'mean': torch.real(yhat)}
-    
-    timing_results = {
-        'rhs_time': rhs_time,
-        'construct_system_time': conv_vector_time,
-        'solve_time': solve_time
-    }
 
-    # Optionally compute posterior variance
-    if opts is not None and opts.get('get_var', False):
-        # TODO: implement this later
-        ytrg['var'] = None
-    
-    # # Optionally compute log marginal likelihood at training locations
-    if opts is not None and opts.get('get_log_marginal_likelihood', False):
-        logdet = N*torch.log(sigmasq) + torch.logdet((D @ F.adjoint() @ F @ D)/sigmasq + torch.eye(mtot, dtype=torch.float64)).to(dtype=torch.float64)
-        alpha = (1/sigmasq) * (y - torch.real(F @ D @ beta))
-        log_marg_lik = -0.5 * y.T @ alpha - 0.5 * logdet - 0.5 * N * torch.log(2 * torch.tensor(torch.pi, dtype=torch.float64))
-        ytrg['log_marginal_likelihood'] = log_marg_lik # TODO: this shouldn't be in ytrg, fix later
+        # Evaluate the posterior mean at the new points
+        # The paper also uses nuFFT here, but we do it manually for now
+        with record_function("posterior_predictive_mean"):
+            Phi_target = torch.exp(1j * 2 * torch.pi * torch.outer(x_new, xis)) @ D
+            yhat = Phi_target @ beta
+
+        ytrg = {'mean': torch.real(yhat)}
+
+        # Optionally compute posterior variance
+        if opts is not None and opts.get('get_var', False):
+            # TODO: implement this later
+            ytrg['var'] = None
+        
+        # # Optionally compute log marginal likelihood at training locations
+        if opts is not None and opts.get('get_log_marginal_likelihood', False):
+            with record_function("log_marginal_likelihood"):
+                logdet = N*torch.log(sigmasq) + torch.logdet((D @ F.adjoint() @ F @ D)/sigmasq + torch.eye(mtot, dtype=torch.float64, device=device)).to(dtype=torch.float64)
+                alpha = (1/sigmasq) * (y - torch.real(F @ D @ beta))
+                log_marg_lik = -0.5 * y.T @ alpha - 0.5 * logdet - 0.5 * N * torch.log(2 * torch.tensor(torch.pi, dtype=torch.float64, device=device))
+                ytrg['log_marginal_likelihood'] = log_marg_lik # TODO: this shouldn't be in ytrg, fix later
+        
+    # Print profiler results
+    print("\nProfiler Results Summary:")
+    print(prof.key_averages().table(
+            sort_by="cuda_time_total", 
+            row_limit=50
+        ))
+    prof.export_chrome_trace("pytorch_profiler_trace.json")
 
     # returning just part of the args
-    return beta, xis, ytrg, timing_results
+    return beta, xis, ytrg
 
 
-
+if __name__ == "__main__":
+    KERNEL_NAME = "matern32"
+    # Set device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using {device} device!")
+    # generate data 
+    EPSILON = 1e-6
+    N = 1000000
+    freq = 0.5    
+    x = torch.linspace(0, 5, N, device=device)
+    y = torch.sin(2 * torch.pi * freq * x) + torch.randn(N, device=device) * 0.1
+    from utils.kernels import get_xis
+    if KERNEL_NAME == "squared_exponential":
+        from kernels.squared_exponential import SquaredExponential
+        kernel = SquaredExponential(dimension=1, lengthscale=0.1, variance=1.0)
+    elif "matern" in KERNEL_NAME:
+        from kernels.matern import Matern
+        kernel = Matern(dimension=1, lengthscale=1.0, name=KERNEL_NAME)
+    
+    efgp1d(x, y, 1.0, kernel, EPSILON, x, opts=None)
