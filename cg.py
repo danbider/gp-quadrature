@@ -17,7 +17,10 @@ class ConjugateGradients:
         x (torch.Tensor): Solution to the linear system
     """
 
-    def __init__(self, A_apply_function, b, x0, tol=1e-6, max_iter=10000, early_stopping=False):
+    def __init__(self, A_apply_function, b, x0, tol=1e-6, early_stopping=True, max_iter=None):
+        # Get device from input tensors
+        device = b.device
+
         if isinstance(A_apply_function, torch.Tensor):
             # if A_apply_function is a matrix, we use it directly
             self.A_apply_function = lambda x: A_apply_function @ x
@@ -32,10 +35,13 @@ class ConjugateGradients:
             dtype = torch.complex128 # for the FFTs in the complex case
         
         print(f"Using {dtype} precision for CG matrix-vector products!")
-        self.b = b.to(dtype=dtype)
-        self.x0 = x0.to(dtype=dtype)
+        print(f"Using {device} device!")
+        self.b = b.to(dtype=dtype, device=device)
+        self.x0 = x0.to(dtype=dtype, device=device)
         self.tol = tol
-        self.max_iter = max_iter
+        self.div_eps = 1e-16 # small value to prevent division by zero
+        # Set max_iter to either the provided value or 2n as a default
+        self.max_iter = max_iter if max_iter is not None else 2 * len(self.b)
         self.early_stopping = early_stopping
         self.iters_completed = None
         self.solution_history = []
@@ -48,32 +54,30 @@ class ConjugateGradients:
         x = self.x0  # initial guess
         r = self.b - self.A_apply_function(x)  # initial residual
         p = r  # initial search direction
-
-        # Add small value for numerical stability
-        eps = 1e-16
         
         for i in range(self.max_iter):
             # TODO: more comments on ops
             Ap = self.A_apply_function(p)  # appears twice, in alpha and next residual
             r_norm = torch.conj(r.T) @ r
-
-            if abs(r_norm) < eps:
-                print(f"Residual norm too small, stopping at iteration {i}")
+            
+            # Check convergence using the user-specified tolerance
+            # using absolute to avoid complex number issues, also sqrt beause dot product is norm squared
+            if self.early_stopping and torch.sqrt(abs(r_norm)) < self.tol:
+                print(f"Converged in {i} iterations: Residual norm {torch.sqrt(abs(r_norm))} below tolerance {self.tol}")
                 break
 
-            alpha_k = r_norm / (torch.conj(p.T) @ Ap + eps)
+            alpha_k = r_norm / (torch.conj(p.T) @ Ap + self.div_eps)
             x = x + alpha_k * p
             self.solution_history.append(x)
             r_next = r - alpha_k * Ap
-            if self.early_stopping and torch.norm(r_next) < self.tol:
-                print(f"Converged in {i} iterations")
-                break
+
             # update search direction
             next_r_norm = torch.conj(r_next.T) @ r_next
-            beta_k = next_r_norm / (r_norm + eps)  # magnitude of next residual over current residual
+            beta_k = next_r_norm / (r_norm + self.div_eps)  # magnitude of next residual over current residual
             p = r_next + beta_k * p  # update search direction
             r = r_next
 
         self.iters_completed = i
+        print(f"Completed {i} iterations, final norm {r_norm}, residual norm: {torch.sqrt(abs(r_norm))}")
 
         return x
