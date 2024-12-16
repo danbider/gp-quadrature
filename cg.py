@@ -34,8 +34,6 @@ class ConjugateGradients:
         else:
             dtype = torch.complex128 # for the FFTs in the complex case
         
-        print(f"Using {dtype} precision for CG matrix-vector products!")
-        print(f"Using {device} device!")
         self.b = b.to(dtype=dtype, device=device)
         self.x0 = x0.to(dtype=dtype, device=device)
         self.tol = tol
@@ -45,7 +43,15 @@ class ConjugateGradients:
         self.early_stopping = early_stopping
         self.iters_completed = None
         self.solution_history = []
-
+        print("="*5 + " CG Solver initialized " + "="*5)
+        print(f"Using {dtype} precision for CG matrix-vector products!")
+        print(f"Using {device} device!")
+        print(f"System size: {len(self.b)}, Max iterations: {self.max_iter}")
+        if self.early_stopping:
+            print(f"Early stopping enabled, tolerance: {self.tol}")
+        else:
+            print("Early stopping disabled")
+        print("="*25)
     def solve(self):
         """Solve the linear system using Conjugate Gradients.
         Returns:
@@ -78,6 +84,6 @@ class ConjugateGradients:
             r = r_next
 
         self.iters_completed = i
-        print(f"Completed {i} iterations, final norm {r_norm}, residual norm: {torch.sqrt(abs(r_norm))}")
+        print(f"Completed {i+1} iterations, final norm {r_norm}, residual norm: {torch.sqrt(abs(r_norm))}")
 
         return x
