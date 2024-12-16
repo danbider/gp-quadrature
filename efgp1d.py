@@ -106,7 +106,7 @@ def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, C
         Afun = lambda beta: D @ FFTConv1d(v, D @ beta)() + sigmasq * beta
 
         # Call conjugate gradients
-        cg_object = ConjugateGradients(A_apply_function=Afun, b=right_hand_side, x0=torch.zeros_like(right_hand_side))
+        cg_object = ConjugateGradients(A_apply_function=Afun, b=right_hand_side, x0=torch.zeros_like(right_hand_side), early_stopping=opts.get('early_stopping', False))
         
         with record_function("solve"):
             beta = cg_object.solve() # beta is the solution to the linear system
@@ -156,6 +156,7 @@ if __name__ == "__main__":
     freq = 0.5    
     x = torch.linspace(0, 5, N, device=device)
     y = torch.sin(2 * torch.pi * freq * x) + torch.randn(N, device=device) * 0.1
+    opts = {'early_stopping': False}
     from utils.kernels import get_xis
     if KERNEL_NAME == "squared_exponential":
         from kernels.squared_exponential import SquaredExponential
@@ -164,4 +165,4 @@ if __name__ == "__main__":
         from kernels.matern import Matern
         kernel = Matern(dimension=1, lengthscale=1.0, name=KERNEL_NAME)
     
-    efgp1d(x, y, 1.0, kernel, EPSILON, x, opts=None)
+    efgp1d(x, y, 1.0, kernel, EPSILON, x, opts=opts)
