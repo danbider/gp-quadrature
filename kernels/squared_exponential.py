@@ -62,3 +62,34 @@ class SquaredExponential(BaseModel):
         # Stack the gradients so that the last dimension contains [dS/dlengthscale, dS/dvariance]
         grad = torch.stack([dS_dlengthscale, dS_dvariance], dim=-1)
         return grad
+    def kernel_matrix(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the kernel matrix K(x, y) for the Squared-exponential kernel.
+        Args:
+            x: first input tensor of shape (n, d)
+            y: second input tensor of shape (m, d)
+        Returns:
+            kernel matrix K(x, y), tensor of shape (n, m)
+        """
+        # Compute the squared distance between each pair of points in x and y
+        if x.ndim == 1:
+            x = x.unsqueeze(-1)
+        if y.ndim == 1:
+            y = y.unsqueeze(-1)
+        dist = torch.cdist(x, y)
+        return self.kernel(dist)
+    def log_marginal(self, x: torch.Tensor, y: torch.Tensor, sigmasq: float) -> float:
+        """
+        Compute the log marginal likelihood of the Squared-exponential kernel.
+        Args:
+            x: input tensor of shape (n, d)
+            y: output tensor of shape (n,)
+            sigmasq: noise variance
+        Returns:
+            log marginal likelihood, float
+        """
+        K = self.kernel_matrix(x, x) + sigmasq * torch.eye(x.shape[0], device=x.device)
+        L = torch.linalg.cholesky(K)
+        alpha = torch.linalg.solve(L.T, torch.linalg.solve(L, y))
+        logdet = 2 * torch.sum(torch.log(torch.diagonal(L)))
+        return -0.5 * (torch.dot(y, alpha) + logdet + x.shape[0] * math.log(2 * math.pi))
