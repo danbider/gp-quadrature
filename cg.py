@@ -43,15 +43,15 @@ class ConjugateGradients:
         self.early_stopping = early_stopping
         self.iters_completed = None
         self.solution_history = []
-        print("="*5 + " CG Solver initialized " + "="*5)
-        print(f"Using {dtype} precision for CG matrix-vector products!")
-        print(f"Using {device} device!")
-        print(f"System size: {len(self.b)}, Max iterations: {self.max_iter}")
-        if self.early_stopping:
-            print(f"Early stopping enabled, tolerance: {self.tol}")
-        else:
-            print("Early stopping disabled")
-        print("="*25)
+        # print("="*5 + " CG Solver initialized " + "="*5)
+        # print(f"Using {dtype} precision for CG matrix-vector products!")
+        # print(f"Using {device} device!")
+        # print(f"System size: {len(self.b)}, Max iterations: {self.max_iter}")
+        # if self.early_stopping:
+            # print(f"Early stopping enabled, tolerance: {self.tol}")
+        # else:
+            # print("Early stopping disabled")
+        # print("="*25)
     def solve(self):
         """Solve the linear system using Conjugate Gradients.
         Returns:
@@ -69,7 +69,7 @@ class ConjugateGradients:
             # Check convergence using the user-specified tolerance
             # using absolute to avoid complex number issues, also sqrt beause dot product is norm squared
             if self.early_stopping and torch.sqrt(abs(r_norm)) < self.tol:
-                print(f"Converged in {i} iterations: Residual norm {torch.sqrt(abs(r_norm))} below tolerance {self.tol}")
+                # print(f"Converged in {i} iterations: Residual norm {torch.sqrt(abs(r_norm))} below tolerance {self.tol}")
                 break
 
             alpha_k = r_norm / (torch.conj(p.T) @ Ap + self.div_eps)
@@ -84,6 +84,59 @@ class ConjugateGradients:
             r = r_next
 
         self.iters_completed = i
-        print(f"Completed {i+1} iterations, final norm {r_norm}, residual norm: {torch.sqrt(abs(r_norm))}")
+        # print(f"Completed {i+1} iterations, final norm {r_norm}, residual norm: {torch.sqrt(abs(r_norm))}")
 
+        return x
+class BatchConjugateGradients:
+    """
+    Batched Conjugate Gradients solver for a set of linear systems A x = b,
+    where A is symmetric positive definite and b has shape (B, n).
+
+    Args:
+        A_apply_function (callable): Function that accepts an input tensor of shape (B, n)
+                                     and returns A @ x (shape (B, n)).
+        b (torch.Tensor): Right-hand side tensor of shape (B, n).
+        x0 (torch.Tensor): Initial guess of shape (B, n).
+        tol (float): Convergence tolerance.
+        early_stopping (bool): Whether to stop early if the residual norm is below tol.
+        max_iter (int): Maximum number of iterations.
+    
+    Returns:
+        x (torch.Tensor): Solution tensor of shape (B, n).
+    """
+    def __init__(self, A_apply_function, b, x0, tol=1e-6, early_stopping=True, max_iter=None):
+        self.A_apply_function = A_apply_function
+        self.b = b
+        self.x0 = x0
+        self.tol = tol
+        self.early_stopping = early_stopping
+        B, n = b.shape
+        self.max_iter = max_iter if max_iter is not None else 2 * n
+        self.div_eps = 1e-16
+
+    def solve(self):
+        x = self.x0.clone()  # (B, n)
+        r = self.b - self.A_apply_function(x)  # (B, n)
+        p = r.clone()  # (B, n)
+        # Compute squared norms for each system: shape (B,)
+        r_norm = torch.sum(torch.conj(r) * r, dim=1)
+        
+        for i in range(self.max_iter):
+            Ap = self.A_apply_function(p)  # (B, n)
+            # Compute inner products: (B,)
+            pAp = torch.sum(torch.conj(p) * Ap, dim=1) + self.div_eps
+            alpha = r_norm / pAp  # (B,)
+            # Update: unsqueeze alpha to multiply elementwise.
+            x = x + alpha.unsqueeze(1) * p
+            r_new = r - alpha.unsqueeze(1) * Ap
+            r_new_norm = torch.sum(torch.conj(r_new) * r_new, dim=1)
+            
+            # Early stopping can be implemented for each system if desired.
+            if self.early_stopping and torch.all(torch.sqrt(r_new_norm) < self.tol):
+                break
+            
+            beta = r_new_norm / (r_norm + self.div_eps)  # (B,)
+            p = r_new + beta.unsqueeze(1) * p
+            r = r_new
+            r_norm = r_new_norm
         return x

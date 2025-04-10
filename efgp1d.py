@@ -57,6 +57,55 @@ class FFTConv1d:
         v_padded, b_padded = self.pad_right()
         conv_result_full = self.fft_multiply_ifft(v_padded, b_padded)
         return self.extract_valid(conv_result_full)
+    
+
+#TODO FFTConv1d on batches 
+# import torch
+
+class BatchFFTConv1d:
+    def __init__(self, v, b):
+        """
+        v: Convolution kernel of shape (..., L_v). Can be batched.
+        b: Signal to be convolved of shape (..., L_b). Can be batched.
+        """
+        self.v = v
+        self.b = b
+        # Use the last dimension for lengths (supports batched tensors)
+        self.len_v = v.shape[-1]
+        self.len_b = b.shape[-1]
+        self.conv_length = self.len_v + self.len_b - 1  # Full convolution length.
+        self.valid_length = self.len_v - self.len_b + 1
+        self.start = self.len_b - 1
+        self.end = self.start + self.valid_length
+
+    def pad_to_length(self, x, target_length):
+        pad_size = target_length - x.shape[-1]
+        return torch.nn.functional.pad(x, (0, pad_size))
+
+    def pad_signals(self):
+        # Next power of two length for efficient FFT computation.
+        fft_length = 1 << (self.conv_length - 1).bit_length()
+        v_padded = self.pad_to_length(self.v, fft_length)
+        b_padded = self.pad_to_length(self.b, fft_length)
+        return v_padded, b_padded
+
+    def fft_multiply_ifft(self, v_padded, b_padded):
+        # Compute FFT along the last dimension.
+        V = torch.fft.fft(v_padded, n=v_padded.shape[-1], dim=-1)
+        B = torch.fft.fft(b_padded, n=b_padded.shape[-1], dim=-1)
+        conv_fft = V * B
+        conv_ifft = torch.fft.ifft(conv_fft, n=v_padded.shape[-1], dim=-1)
+        return conv_ifft
+
+    def extract_valid(self, conv_result_full):
+        # Extract the valid convolution result along the last dimension.
+        return conv_result_full[..., self.start:self.end]
+
+    def __call__(self):
+        v_padded, b_padded = self.pad_signals()
+        conv_result_full = self.fft_multiply_ifft(v_padded, b_padded)
+        return self.extract_valid(conv_result_full)
+
 
 def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, Callable], eps: float, x_new: torch.Tensor, do_profiling: bool = True, opts: Optional[Dict] = None):
     """
@@ -79,7 +128,7 @@ def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, C
 
         # Get Fourier frequencies and weights
         xis, h, mtot = get_xis(kernel, eps, L.item())
-        print(f"Number of quadrature nodes: {mtot}")
+        # print(f"Number of quadrature nodes: {mtot}")
         xis = xis.to(device=device)
         ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=torch.complex128, device=device) * h)
         D = torch.diag(ws)
@@ -134,12 +183,12 @@ def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, C
                 ytrg['log_marginal_likelihood'] = log_marg_lik # TODO: this shouldn't be in ytrg, fix later
         
     # Print profiler results
-    print("\nProfiler Results Summary:")
-    print(prof.key_averages().table(
-            sort_by="cuda_time_total", 
-            row_limit=50
-        ))
-    prof.export_chrome_trace("pytorch_profiler_trace.json")
+    # print("\nProfiler Results Summary:")
+    # print(prof.key_averages().table(
+    #         sort_by="cuda_time_total", 
+    #         row_limit=50
+    #     ))
+    # prof.export_chrome_trace("pytorch_profiler_trace.json")
 
     # returning just part of the args
     return beta, xis, ytrg
