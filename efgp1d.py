@@ -4,6 +4,8 @@ from utils.kernels import get_xis
 from cg import ConjugateGradients
 import time
 from torch.profiler import profile, record_function, ProfilerActivity
+import finufft
+
 
 def compute_convolution_vector_vectorized(m: int, x: torch.Tensor, h: float) -> torch.Tensor:
     """
@@ -15,9 +17,22 @@ def compute_convolution_vector_vectorized(m: int, x: torch.Tensor, h: float) -> 
     Returns:
         torch.Tensor: Convolution vector of shape (4m+1,)
     """
+    #TODO multiple dimensions. 
     j_indices = torch.arange(-2*m, 2*m + 1).to(dtype=torch.complex128, device=x.device) # j = -2m, ..., 2m
-    exponents = 2 * torch.pi * 1j * h * torch.outer(j_indices, x).to(dtype=torch.complex128)
-    v = torch.sum(torch.exp(exponents), dim=1).conj()
+    # exponents = 2 * torch.pi * 1j * h * torch.outer(j_indices, x).to(dtype=torch.complex128) # O(MN)
+    # v = torch.sum(torch.exp(exponents), dim=1).conj()
+    coeffs_ones = torch.ones_like(x, dtype=torch.complex128)
+    nufft_eps = 1e-15
+    target_locations_s = (2 * torch.pi * h * j_indices.to(dtype=torch.float64)).numpy()
+    source_locations_x = x.numpy()
+    v = torch.tensor(finufft.nufft1d3(
+        x=source_locations_x,       
+        c=coeffs_ones.numpy(),      
+        s=target_locations_s,       
+        isign=-1,                
+        eps=nufft_eps,
+    ), dtype=torch.complex128)
+
     # TODO: the final conjugation was necessary to make everything match, but I am not sure it matches the equation
     return v, j_indices
 
@@ -182,7 +197,7 @@ def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, C
                 log_marg_lik = -0.5 * y.T @ alpha - 0.5 * logdet - 0.5 * N * torch.log(2 * torch.tensor(torch.pi, dtype=torch.float64, device=device))
                 ytrg['log_marginal_likelihood'] = log_marg_lik # TODO: this shouldn't be in ytrg, fix later
         
-    # Print profiler results
+    # Print profiler results 
     # print("\nProfiler Results Summary:")
     # print(prof.key_averages().table(
     #         sort_by="cuda_time_total", 
