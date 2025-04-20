@@ -5,7 +5,9 @@ from cg import ConjugateGradients
 import time
 from torch.profiler import profile, record_function, ProfilerActivity
 import finufft
-
+import pytorch_finufft.functional as pff
+import numpy as np
+import math
 
 def compute_convolution_vector_vectorized(m: int, x: torch.Tensor, h: float) -> torch.Tensor:
     """
@@ -18,23 +20,32 @@ def compute_convolution_vector_vectorized(m: int, x: torch.Tensor, h: float) -> 
         torch.Tensor: Convolution vector of shape (4m+1,)
     """
     #TODO multiple dimensions. 
-    j_indices = torch.arange(-2*m, 2*m + 1).to(dtype=torch.complex128, device=x.device) # j = -2m, ..., 2m
-    # exponents = 2 * torch.pi * 1j * h * torch.outer(j_indices, x).to(dtype=torch.complex128) # O(MN)
-    # v = torch.sum(torch.exp(exponents), dim=1).conj()
-    coeffs_ones = torch.ones_like(x, dtype=torch.complex128)
-    nufft_eps = 1e-15
-    target_locations_s = (2 * torch.pi * h * j_indices.to(dtype=torch.float64)).numpy()
-    source_locations_x = x.numpy()
-    v = torch.tensor(finufft.nufft1d3(
-        x=source_locations_x,       
-        c=coeffs_ones.numpy(),      
-        s=target_locations_s,       
-        isign=-1,                
-        eps=nufft_eps,
-    ), dtype=torch.complex128)
+    # v = torch.tensor(finufft.nufft1d1(
+    #     x=(2 * torch.pi * h * x).numpy(), 
+    #     c=np.ones_like(x,dtype=np.complex128),                
+    #     n_modes=4 * m + 1 ,                      
+    #     isign=-1,                       
+    #     eps=1e-15,
+    # ), dtype=torch.complex128)
 
-    # TODO: the final conjugation was necessary to make everything match, but I am not sure it matches the equation
-    return v, j_indices
+    device      = x.device
+    dtype_real  = x.dtype
+    dtype_cmplx = torch.complex64 if dtype_real == torch.float32 else torch.complex128
+    eps = 1e-15
+    # non‑uniform points mapped to phase  φ = 2π h x
+    phi = (2 * math.pi * h * x).to(dtype_real)                # (N,)
+
+    mtot_big = 4 * m + 1                                      # length 4m+1
+    OUT      = (mtot_big,)                                    # iterable shape!
+
+    # constant weights c_j = 1 + 0i
+    c = torch.ones_like(x, dtype=dtype_cmplx, device=device)
+
+    # type‑1 NUFFT (adjoint): NU → U   in CMCL order (modeord=False)
+    v = pff.finufft_type1(
+            phi.unsqueeze(0), c, OUT,
+            eps=eps, isign=-1, modeord=False)
+    return v
 
 class FFTConv1d:
     def __init__(self, v, b):
@@ -74,8 +85,6 @@ class FFTConv1d:
         return self.extract_valid(conv_result_full)
     
 
-#TODO FFTConv1d on batches 
-# import torch
 
 class BatchFFTConv1d:
     def __init__(self, v, b):
@@ -122,6 +131,48 @@ class BatchFFTConv1d:
         return self.extract_valid(conv_result_full)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────
+def _cmplx(real_dtype: torch.dtype) -> torch.dtype:
+    """Matching complex dtype for a given real dtype."""
+    return torch.complex64 if real_dtype == torch.float32 else torch.complex128
+
+
+class Toeplitz1D:
+    """
+    Fast linear convolution with a fixed CMCL‑ordered kernel.
+    Caches the FFT once, works with any batch shape of the input.
+    """
+    def __init__(self, v: torch.Tensor, *, force_pow2: bool = True):
+        if not v.is_complex():
+            v = v.to(torch.complex128)
+
+        self.L   = v.shape[-1]                       # 2n − 1
+        self.n   = (self.L + 1) // 2                 # matrix size  n
+        L_fft    = 1 << (self.L - 1).bit_length() if force_pow2 else self.L
+        pad_tail = L_fft - self.L
+
+        v_pad    = torch.nn.functional.pad(v, (0, pad_tail))
+        self.fft_v = torch.fft.fft(v_pad, dim=-1)    # cached
+        self.start = self.n - 1                      # ← use n, not L
+        self.end   = self.start + self.n
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        if not x.is_complex():
+            x = x.to(torch.complex128)
+        assert x.shape[-1] == self.n, \
+            f"Input length {x.shape[-1]} ≠ kernel matrix size {self.n}"
+
+        pad_tail = self.fft_v.shape[-1] - x.shape[-1]
+        x_pad    = torch.nn.functional.pad(x, (0, pad_tail))
+
+        y_fft = self.fft_v * torch.fft.fft(x_pad, dim=-1)
+        y     = torch.fft.ifft(y_fft, dim=-1)[..., self.start:self.end]
+        return y
+    
+
+
 def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, Callable], eps: float, x_new: torch.Tensor, do_profiling: bool = True, opts: Optional[Dict] = None):
     """
     Fast equispaced Fourier GP regression in 1D.
@@ -146,6 +197,11 @@ def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, C
         # print(f"Number of quadrature nodes: {mtot}")
         xis = xis.to(device=device)
         ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=torch.complex128, device=device) * h)
+
+
+        # TODO redo with NUFFT
+
+        
         D = torch.diag(ws)
 
         ##### compute the right hand side #####
@@ -160,7 +216,7 @@ def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, C
         # In the original work, this was done using NUFFT, but here we do it manually
         # we can also do it via taking the first row and column of F^* F (see discrete_convolution_tests.ipynb)
         with record_function("convolution_vector"):
-            v, j_indices = compute_convolution_vector_vectorized(m=int((mtot - 1) / 2), x=x, h=h)
+            v = compute_convolution_vector_vectorized(m=int((mtot - 1) / 2), x=x, h=h)
 
 
         ##### solve linear system (DF^*FD + sigma^2)beta = rhs with the conjugate gradients method #####
@@ -207,6 +263,98 @@ def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, C
 
     # returning just part of the args
     return beta, xis, ytrg
+
+
+
+from typing import Dict, Optional, Callable
+
+
+
+# ─── original function with ONLY NUFFT + Toeplitz edits ──────────────
+def efgp1d_NUFFT(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
+                 kernel: dict, eps: float, x_new: torch.Tensor,
+                 do_profiling: bool = True, opts: Optional[dict] = None):
+
+    activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA] if do_profiling else []
+    with profile(activities=activities, record_shapes=True) as prof:
+
+        # ---------- casts ---------------------------------------------------
+        device = x.device
+        rdtype = torch.float64
+        cdtype = _cmplx(rdtype)
+
+        x = x.to(dtype=rdtype)
+        y = y.to(dtype=rdtype)
+        x_new = x_new.to(dtype=rdtype)
+
+        # ---------- geometry -----------------------------------------------
+        x0, x1 = torch.min(torch.cat([x, x_new])), torch.max(torch.cat([x, x_new]))
+        L = x1 - x0
+        N = x.shape[0]
+
+        # ---------- quadrature ---------------------------------------------
+        xis, h, mtot = get_xis(kernel, eps, L.item())
+        xis = xis.to(device)
+        ws  = torch.sqrt(kernel.spectral_density(xis).to(cdtype) * h)  # (M,)
+        M   = mtot
+
+        # ---------- NUFFT wrappers (CMCL order) ----------------------------
+        OUT = (M,)
+        nufft_eps = 1e-15
+
+        def finufft1(phi, vals):
+            return pff.finufft_type1(phi.unsqueeze(0), vals.to(cdtype), OUT,
+                                     eps=nufft_eps, isign=-1, modeord=False)
+
+        def finufft2(phi, fk):
+            return pff.finufft_type2(phi.unsqueeze(0), fk.to(cdtype),
+                                     eps=nufft_eps, isign=+1, modeord=False)
+
+        phi = (2 * math.pi * h * (x - 0.0)).to(rdtype)
+        fadj = lambda v: finufft1(phi, v)          # NU → U
+
+        # ---------- RHS -----------------------------------------------------
+        with record_function("right_hand_side"):
+            right_hand_side = ws * fadj(y)
+
+        # ---------- Toeplitz kernel & operator -----------------------------
+        with record_function("convolution_vector"):
+            v_kernel = compute_convolution_vector_vectorized(
+                m=int((mtot - 1) / 2), x=x, h=h).to(cdtype)
+
+        toeplitz = Toeplitz1D(v_kernel)
+
+        def A_apply(beta):
+            return ws * toeplitz(ws * beta) + sigmasq * beta
+
+        # ---------- CG solve ------------------------------------------------
+        cg_object = ConjugateGradients(A_apply, b=right_hand_side,
+                                       x0=torch.zeros_like(right_hand_side),
+                                       early_stopping=False)
+        with record_function("solve"):
+            beta = cg_object.solve()
+
+        # ---------- posterior predictive mean ------------------------------
+        with record_function("posterior_predictive_mean"):
+            phi_new = (2 * math.pi * h * (x_new - 0.0)).to(rdtype)
+            yhat = finufft2(phi_new, ws * beta).real
+
+        ytrg = {'mean': yhat}
+
+        # ---------- optional outputs ---------------------------------------
+        if opts is not None and opts.get('get_var', False):
+            ytrg['var'] = None  # TODO
+
+        if opts is not None and opts.get('get_log_marginal_likelihood', False):
+            ytrg['log_marginal_likelihood'] = None  # TODO
+
+    # ---------- profiler summary -------------------------------------------
+    # print("\nProfiler Results Summary:")
+    # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=50))
+
+    return beta, xis, ytrg
+
+# torch.allclose(ytrg, ytrg_old)
 
 
 if __name__ == "__main__":
