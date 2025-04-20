@@ -1,7 +1,7 @@
 import torch
 from typing import Dict, Optional, Callable
 from utils.kernels import get_xis
-from cg import ConjugateGradients
+from cg import ConjugateGradients, BatchConjugateGradients
 import time
 from torch.profiler import profile, record_function, ProfilerActivity
 import finufft
@@ -270,7 +270,6 @@ from typing import Dict, Optional, Callable
 
 
 
-# ─── original function with ONLY NUFFT + Toeplitz edits ──────────────
 def efgp1d_NUFFT(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
                  kernel: dict, eps: float, x_new: torch.Tensor,
                  do_profiling: bool = True, opts: Optional[dict] = None):
@@ -280,6 +279,7 @@ def efgp1d_NUFFT(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
 
         # ---------- casts ---------------------------------------------------
         device = x.device
+        dtype = torch.float64 # Use float64 as in the original example
         rdtype = torch.float64
         cdtype = _cmplx(rdtype)
 
@@ -341,9 +341,46 @@ def efgp1d_NUFFT(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
 
         ytrg = {'mean': yhat}
 
-        # ---------- optional outputs ---------------------------------------
-        if opts is not None and opts.get('get_var', False):
-            ytrg['var'] = None  # TODO
+            ### Variance calculation
+
+
+        # (F* F/sigmasq + I/ws**2)
+        def C_apply(beta):
+            return ws* toeplitz(ws*beta)/sigmasq +  beta
+        
+        
+        
+        m  = (mtot - 1) // 2
+        k  = torch.cat((
+                torch.arange(-m, 0,  device=device, dtype=dtype),  # -m,…,-1
+                torch.arange( 0, m+1, device=device, dtype=dtype)   #  0,…, m
+        ))              
+        # form batches of f_x
+        # def f_x_batch(x_batch: torch.Tensor, h: float) -> torch.Tensor:
+        #     """
+        #     x_batch : (B,)  real
+        #     Returns  : (B, M) complex   with CMCL ordering
+        #     """
+        phase = 1j * 2 * math.pi * h * x_new[:, None] * k[None, :]   # (B,M)
+        f_x = torch.exp(phase) 
+        # Compute f_x for the batch of test points
+        # f_x = f_x_batch(x_new, h)  # (B,M) complex
+        
+        # Initialize BatchConjugateGradients to solve C^{-1} f_x 
+        batch_cg = BatchConjugateGradients(
+            C_apply, 
+            ws*f_x.conj(), 
+            torch.zeros_like(f_x.conj()),
+            tol=1e-6, 
+            early_stopping=False
+        )
+        ### End Variance calculation
+        
+        # Solve the system for all points in the batch simultaneously
+        C_inv_f_x = ws *batch_cg.solve()  # (B,M) complex
+        
+        s2 = torch.real((f_x * C_inv_f_x).sum(dim=1))    # (B,)
+        ytrg['var'] = s2
 
         if opts is not None and opts.get('get_log_marginal_likelihood', False):
             ytrg['log_marginal_likelihood'] = None  # TODO
@@ -353,6 +390,95 @@ def efgp1d_NUFFT(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
     # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=50))
 
     return beta, xis, ytrg
+
+def efgp1d_gradient_batched(
+        x, y, sigmasq, kernel, eps, trace_samples, x0, x1,
+        *, nufft_eps=1e-15, device=None, dtype=torch.float64):
+    """
+    Gradient of the 1‑D GP log‑marginal likelihood estimated with
+    Hutchinson trace + CG, completely torch native.
+    """
+    # 0)  Book‑keeping ------------------------------------------------------
+    device  = device or x.device
+    x       = x.to(device, dtype).flatten()
+    y       = y.to(device, dtype).flatten()
+    cmplx   = _cmplx(dtype)
+
+    L       = x1 - x0
+    xis, h, mtot = get_xis(kernel, eps, L)           # |xis| = M
+    M       = xis.numel()
+    ws      = torch.sqrt(kernel.spectral_density(xis) * h).to(cmplx)
+    Dprime  = (h * kernel.spectral_grad(xis)).to(cmplx)  # (M, 3)
+
+    # 1)  NUFFT adjoint / forward helpers (modeord=False) -------------------
+    OUT = (mtot,)
+    
+    nufft_eps = 1e-15
+    finufft1 = lambda pts, vals: pff.finufft_type1(
+        pts.unsqueeze(0), vals.to(cmplx), OUT,
+        eps=nufft_eps, isign=-1, modeord=False)
+
+    finufft2 = lambda pts, fk: pff.finufft_type2(
+        pts.unsqueeze(0), fk.to(cmplx),
+        eps=nufft_eps, isign=+1, modeord=False)
+    phi = (2 * math.pi * h * (x - 0.0)).to(dtype)    # real (N,)
+    fadj = lambda v: finufft1(phi, v)    # NU → U
+    fwd  = lambda fk: finufft2(phi, fk)  # U  → NU
+
+    # 2)  Toeplitz operator T (cached FFT) ----------------------------------
+    m          = (M - 1) // 2
+    v_kernel   = compute_convolution_vector_vectorized(m, x, h).to(cmplx)
+    toeplitz   = Toeplitz1D(v_kernel)               # cached once
+
+    # 3)  Linear map A· = D F*F (D·) + σ² I -------------------------------
+    def A_apply(beta):
+        return ws * toeplitz(ws * beta) + sigmasq * beta
+
+    # 4)  Solve A β = W F* y ---------------------------------------------
+    rhs   = ws * fadj(y)
+    beta  = ConjugateGradients(A_apply, rhs,
+                               torch.zeros_like(rhs),
+                               early_stopping=False).solve()
+    alpha = (y - fwd(ws * beta)) / sigmasq
+
+    # 5)  Term‑2  (α*D'α, α*α) --------------------------------------------
+    fadj_alpha = fadj(alpha)
+    term2 = torch.stack((
+        torch.vdot(fadj_alpha, Dprime[:, 0] * fadj_alpha),
+        torch.vdot(fadj_alpha, Dprime[:, 1] * fadj_alpha),
+        torch.vdot(alpha,       alpha)
+    ))
+
+    # 6)  Monte‑Carlo trace (Term‑1) ---------------------------------------
+    T  = trace_samples
+    Z  = (2 * torch.randint(0, 2, (T, x.numel()), device=device,
+                            dtype=dtype) - 1).to(cmplx)
+    fadjZ = fadj(Z)
+
+    B_blocks, R_blocks = [], []
+    for i in range(3):
+        rhs_i = fwd(Dprime[:, i] * fadjZ) if i < 2 else Z
+        R_blocks.append(rhs_i)
+        B_blocks.append(ws * fadj(rhs_i))
+
+    B_all = torch.cat(B_blocks, 0)       # (3T, M)
+    R_all = torch.cat(R_blocks, 0)       # (3T, N)
+
+    def A_apply_batch(B):
+        return ws * toeplitz(ws * B) + sigmasq * B
+
+    Beta_all = BatchConjugateGradients(
+        A_apply_batch, B_all, torch.zeros_like(B_all),
+        tol=1e-6, early_stopping=False).solve()
+
+    Alpha_all = (R_all - fwd(ws * Beta_all)) / sigmasq
+    A_chunks  = Alpha_all.chunk(3, 0)
+
+    term1 = torch.stack([(Z * a).sum(1).mean() for a in A_chunks])
+
+    # 7)  Gradient ----------------------------------------------------------
+    grad = 0.5 * (term1 - term2)
+    return grad.real   
 
 # torch.allclose(ytrg, ytrg_old)
 
