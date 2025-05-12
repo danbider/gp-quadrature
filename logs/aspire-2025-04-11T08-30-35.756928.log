@@ -1,0 +1,25 @@
+2025-04-11 08:30:35,760 DEBUG [root] ASPIRE configuration directory is /Users/colecitrenbaum/.config/ASPIRE
+2025-04-11 08:30:35,760 DEBUG [root] ASPIRE configuration resolution details [({'logging': {'log_dir': '/Users/colecitrenbaum/Documents/GPs/gp-quadrature/logs'}}, ConfigSource(<super: <class 'ConfigSource'>, <ConfigSource object>>, None, False, False)), ({}, ConfigSource(<super: <class 'ConfigSource'>, <YamlSource object>>, '/Users/colecitrenbaum/.config/ASPIRE/config.yaml', False, False)), ({'version': '0.13.2', 'common': OrderedDict({'numeric': 'numpy', 'fft': 'scipy'}), 'cache': OrderedDict({'cache_dir': '', 'grid_cache_size': None, 'filter_cache_size': 2}), 'logging': OrderedDict({'log_dir': 'logs', 'log_exceptions': 1, 'tqdm_disable': False, 'console_level': 'INFO', 'log_file_level': 'DEBUG', 'log_prefix': 'aspire'}), 'nufft': OrderedDict({'backends': ['cufinufft', 'finufft', 'pynfft']})}, ConfigSource(<super: <class 'ConfigSource'>, <YamlSource object>>, '/Users/colecitrenbaum/Documents/GPs/gp-quadrature/ASPIRE-Python/src/aspire/config_default.yaml', True, False))]
+2025-04-11 08:30:35,761 DEBUG [root] Resolved config.yaml:
+
+logging:
+    log_dir: /Users/colecitrenbaum/Documents/GPs/gp-quadrature/logs
+    log_exceptions: 1
+    tqdm_disable: no
+    console_level: INFO
+    log_file_level: DEBUG
+    log_prefix: aspire
+version: 0.13.2
+common:
+    numeric: numpy
+    fft: scipy
+
+cache:
+    cache_dir: ''
+    grid_cache_size:
+    filter_cache_size: 2
+
+nufft:
+    backends: [cufinufft, finufft, pynfft]
+
+
