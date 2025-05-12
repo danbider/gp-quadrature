@@ -8,7 +8,180 @@ import finufft
 import pytorch_finufft.functional as pff
 import numpy as np
 import math
+import torch.nn.functional as nnf
 
+from math import prod
+from typing import Dict, Optional, Callable
+
+class ToeplitzND:
+    """
+    Fast d‑dimensional block‑Toeplitz convolution via FFT.
+    Caches the FFT of a fixed kernel and then performs
+    conv with any flat-or-block input.
+
+    Args:
+      v: complex tensor of shape (L1,...,Ld) with Li = 2*ni - 1
+      force_pow2: zero‑pad each dim to next power‑of‑2
+
+    Call with x either:
+      • flat: 1D tensor of length prod(ni), or
+      • block: tensor whose last d dims are exactly (n1,...,nd)
+    """
+    def __init__(self, v: torch.Tensor, *, force_pow2: bool = True):
+        # ensure complex
+        if not v.is_complex():
+            v = v.to(torch.complex128)
+        self.device = v.device
+
+        # dims and block‑sizes
+        self.Ls   = list(v.shape)                   # [L1,...,Ld]
+        self.ns   = [(L+1)//2 for L in self.Ls]     # [n1,...,nd]
+        self.size = prod(self.ns)                   # total block elements
+
+        # fft grid
+        if force_pow2:
+            self.fft_shape = [1 << (L-1).bit_length() for L in self.Ls]
+        else:
+            self.fft_shape = self.Ls.copy()
+
+        # pad & cache kernel FFT
+        pad = []
+        for L, F in zip(reversed(self.Ls), reversed(self.fft_shape)):
+            pad += [0, F - L]
+        v_pad     = nnf.pad(v.to(self.device), pad)
+        self.fft_v = torch.fft.fftn(v_pad, s=self.fft_shape,
+                                    dim=list(range(-len(self.Ls), 0)))
+
+        # slice indices for central block
+        self.starts = [n-1 for n in self.ns]
+        self.ends   = [st+n for st, n in zip(self.starts, self.ns)]
+
+    # def __call__(self, x: torch.Tensor) -> torch.Tensor:
+    #     x = x.to(self.device)
+    #     flat = False
+
+    #     # detect flat vs block
+    #     if x.ndim == 1 and x.numel() == self.size:
+    #         flat = True
+    #         x = x.view(*self.ns)
+    #     elif x.ndim >= len(self.ns) and list(x.shape[-len(self.ns):]) == self.ns:
+    #         flat = False
+    #     else:
+    #         raise AssertionError(
+    #             f"Expected flat length {self.size} or block shape {*self.ns,}, got {tuple(x.shape)}"
+    #         )
+
+    #     # ensure complex
+    #     if not x.is_complex():
+    #         x = x.to(torch.complex128)
+
+    #     # pad x → fft grid
+    #     pad = []
+    #     for n, F in zip(reversed(self.ns), reversed(self.fft_shape)):
+    #         pad += [0, F - n]
+    #     x_pad = nnf.pad(x, pad)
+
+    #     # FFT conv
+    #     y  = torch.fft.ifftn(self.fft_v * torch.fft.fftn(x_pad, s=self.fft_shape,
+    #                                                     dim=list(range(-len(self.ns), 0))),
+    #                          s=self.fft_shape,
+    #                          dim=list(range(-len(self.ns), 0)))
+
+    #     # slice central block
+    #     slices = [slice(None)]*(y.ndim - len(self.ns))
+    #     for st, en in zip(self.starts, self.ends):
+    #         slices.append(slice(st, en))
+    #     y = y[tuple(slices)]
+
+    #     return y.flatten() if flat else y
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Accepts x with shape (..., self.size)  – flat batch
+                    or  (..., *self.ns)       – block batch
+        and returns a tensor of the same outer-batch shape.
+        """
+        x = x.to(self.device)
+        orig_flat = False                     # remember how input looked
+
+        # ---------- detect layout ----------------------------------------
+        if x.shape[-1] == self.size:          # (..., N)  – flat batch
+            orig_flat = True
+            batch_shape = x.shape[:-1]
+            x = x.view(*batch_shape, *self.ns)
+        elif list(x.shape[-len(self.ns):]) == self.ns:
+            batch_shape = x.shape[:-len(self.ns)]
+        else:
+            raise AssertionError(
+                f"Expected trailing dim {self.size} or block {tuple(self.ns)}, got {tuple(x.shape)}"
+            )
+
+        # ---------- promote to complex -----------------------------------
+        if not x.is_complex():
+            x = x.to(torch.complex128)
+
+        # ---------- zero-pad to FFT grid ---------------------------------
+        pad = []
+        for n, F in zip(reversed(self.ns), reversed(self.fft_shape)):
+            pad += [0, F - n]                 # torch.nn.functional.pad wants (dim_k_before, dim_k_after) pairs
+        x_pad = nnf.pad(x, pad)
+
+        # ---------- FFT convolution --------------------------------------
+        x_fft = torch.fft.fftn(x_pad, s=self.fft_shape,
+                            dim=list(range(-len(self.ns), 0)))
+        y     = torch.fft.ifftn(self.fft_v * x_fft,
+                                s=self.fft_shape,
+                                dim=list(range(-len(self.ns), 0)))
+
+        # ---------- crop central block -----------------------------------
+        slices = [slice(None)] * y.ndim       # keep batch dims
+        for st, en in zip(self.starts, self.ends):
+            slices[-len(self.starts) + len(slices) - y.ndim]  # just to calm linters
+        slices = [slice(None)] * (y.ndim - len(self.ns))
+        for st, en in zip(self.starts, self.ends):
+            slices.append(slice(st, en))
+        y = y[tuple(slices)]
+
+        # ---------- restore original layout ------------------------------
+        # ---------- restore original layout ------------------------------
+        if orig_flat:
+            # Either option below is fine; reshape is the simpler one.
+            y = y.reshape(*batch_shape, self.size)          # works with non-contiguous tensors
+            # y = y.contiguous().view(*batch_shape, self.size)  # alternative
+
+        return y
+
+    
+def compute_convolution_vector_vectorized_dD(m: int, x: torch.Tensor, h: float) -> torch.Tensor:
+    """
+    Multi‑D type‑1 NUFFT convolution vector:
+      v[k1,...,kd] = sum_n exp(2πi <k, x_n>)
+    """
+    device      = x.device
+    dtype_real  = x.dtype
+    dtype_cmplx = torch.complex64 if dtype_real == torch.float32 else torch.complex128
+    if x.ndim == 1:
+        x = x[:, None]
+    N, d        = x.shape
+    eps         = 1e-15
+
+    # (d, N) array of phases
+    phi = (2 * math.pi * h * x).T.contiguous().to(dtype_real)
+
+    # all weights = 1 + 0i
+    c = torch.ones(N, dtype=dtype_cmplx, device=device)
+
+    # output grid size in each of the d dims
+    OUT = tuple([4*m + 1] * d)
+
+    v = pff.finufft_type1(
+        phi,    # (d, N)
+        c,      # (N,)
+        OUT,
+        eps=eps,
+        isign=-1,
+        modeord=False
+    )
+    return v
 def compute_convolution_vector_vectorized(m: int, x: torch.Tensor, h: float) -> torch.Tensor:
     """
     Vectorized implementation of compute_convolution_vector
@@ -266,7 +439,6 @@ def efgp1d(x: torch.Tensor, y: torch.Tensor, sigmasq: float, kernel: Dict[str, C
 
 
 
-from typing import Dict, Optional, Callable
 
 
 
@@ -393,7 +565,7 @@ def efgp1d_NUFFT(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
 
 def efgp1d_gradient_batched(
         x, y, sigmasq, kernel, eps, trace_samples, x0, x1,
-        *, nufft_eps=1e-15, device=None, dtype=torch.float64):
+        *, nufft_eps=1e-15, cg_tol = 1e-4, early_stopping = True, device=None, dtype=torch.float64):
     """
     Gradient of the 1‑D GP log‑marginal likelihood estimated with
     Hutchinson trace + CG, completely torch native.
@@ -438,7 +610,7 @@ def efgp1d_gradient_batched(
     rhs   = ws * fadj(y)
     beta  = ConjugateGradients(A_apply, rhs,
                                torch.zeros_like(rhs),
-                               early_stopping=False).solve()
+                               tol=cg_tol, early_stopping=early_stopping).solve()
     alpha = (y - fwd(ws * beta)) / sigmasq
 
     # 5)  Term‑2  (α*D'α, α*α) --------------------------------------------
@@ -469,7 +641,7 @@ def efgp1d_gradient_batched(
 
     Beta_all = BatchConjugateGradients(
         A_apply_batch, B_all, torch.zeros_like(B_all),
-        tol=1e-6, early_stopping=False).solve()
+        tol=cg_tol, early_stopping=early_stopping).solve()
 
     Alpha_all = (R_all - fwd(ws * Beta_all)) / sigmasq
     A_chunks  = Alpha_all.chunk(3, 0)
