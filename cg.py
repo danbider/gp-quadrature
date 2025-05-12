@@ -62,31 +62,47 @@ class ConjugateGradients:
         p = r  # initial search direction
         
         for i in range(self.max_iter):
-            # TODO: more comments on ops
-            Ap = self.A_apply_function(p)  # appears twice, in alpha and next residual
-            r_norm = torch.conj(r.T) @ r
+            # Compute matrix-vector product once to reuse
+            Ap = self.A_apply_function(p)
+            
+            # Compute inner product based on tensor dimensions
+            r_norm = self._inner_product(r, r)
             
             # Check convergence using the user-specified tolerance
-            # using absolute to avoid complex number issues, also sqrt beause dot product is norm squared
+            # using absolute to avoid complex number issues, also sqrt because dot product is norm squared
             if self.early_stopping and torch.sqrt(abs(r_norm)) < self.tol:
-                # print(f"Converged in {i} iterations: Residual norm {torch.sqrt(abs(r_norm))} below tolerance {self.tol}")
                 break
 
-            alpha_k = r_norm / (torch.conj(p.T) @ Ap + self.div_eps)
+            # Compute step size
+            alpha_k = r_norm / (self._inner_product(p, Ap) + self.div_eps)
+            
+            # Update solution
             x = x + alpha_k * p
             self.solution_history.append(x)
+            
+            # Update residual
             r_next = r - alpha_k * Ap
-
-            # update search direction
-            next_r_norm = torch.conj(r_next.T) @ r_next
+            
+            # Compute next residual norm
+            next_r_norm = self._inner_product(r_next, r_next)
+            
+            # Update search direction
             beta_k = next_r_norm / (r_norm + self.div_eps)  # magnitude of next residual over current residual
             p = r_next + beta_k * p  # update search direction
             r = r_next
 
         self.iters_completed = i
-        # print(f"Completed {i+1} iterations, final norm {r_norm}, residual norm: {torch.sqrt(abs(r_norm))}")
-
         return x
+        
+    def _inner_product(self, a, b):
+        """Helper method to compute inner product based on tensor dimensions."""
+        if a.dim() == 1:
+            return torch.dot(torch.conj(a), b)
+        elif a.dim() == 2:
+            return torch.conj(a.T) @ b
+        else:
+            # For higher dimensional tensors, use mT (matrix transpose)
+            return torch.conj(a.mT) @ b
 class BatchConjugateGradients:
     """
     Batched Conjugate Gradients solver for a set of linear systems A x = b,
@@ -201,5 +217,4 @@ class BatchConjugateGradients:
                 active[idx] = ~converged                     # no aliasing problem
 
         return x
-
 
