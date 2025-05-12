@@ -91,6 +91,7 @@ def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, u
     
     if use_integral:
         truncation_bound = GetTruncationBound(eps, kernel_obj.kernel, dtype=dtype)
+        
         Ltime = truncation_bound.find_truncation_bound()  # find eps-support
         h_spacing = 1 / (L + Ltime)  # xi node spacing so nearest aliased tail <= eps
         
@@ -131,6 +132,10 @@ def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, u
             hm = math.ceil(math.sqrt(math.log(dim*(4**(dim+1))/eps)/2)/math.pi/l/h_spacing)  # again, the paper sometime uses "m"
     
     xis = torch.arange(-hm, hm+1, device='cpu', dtype=dtype) * h_spacing  # use exactly h, so can get bit of spillover
+
+ 
+
+
     mtot = xis.numel()  # 2m+1
     
     return xis, h_spacing, mtot

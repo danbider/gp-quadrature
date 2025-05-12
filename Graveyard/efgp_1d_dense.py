@@ -60,7 +60,7 @@ def efgp1d_dense(x, y, sigmasq, kernel, eps, x_new, opts=None):
     else:
         # Solve using conjugate gradients
         cg_object = ConjugateGradients(A_apply_function=A + sigmasq * torch.eye(mtot, dtype=A.dtype), b=rhs, x0=torch.zeros_like(rhs), early_stopping=opts.get('early_stopping', False))
-        beta = cg_object.solve()
+        beta = cg_object.solve() 
     solve_time = time.time() - start_time
 
     # Evaluate posterior mean at target points
