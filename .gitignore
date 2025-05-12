@@ -9,3 +9,5 @@ __pycache__
 # ignore pytorch cache files
 .cache/
 
+efgp1d.py
+efgp3d.py
