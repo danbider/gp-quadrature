@@ -2,7 +2,6 @@
 Fast Gaussian Process regression with equispaced quadrature rules. See efgnpd_ex.ipynb for example usage.
 
 ## Installation
-#TODO add the other requirements.
 Clone the repository and install the package in development mode:
 
 ```
