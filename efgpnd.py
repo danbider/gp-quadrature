@@ -58,6 +58,7 @@ def efgp_nd(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
             eps: float,
             x_new: torch.Tensor,
             do_profiling: bool = False,
+            nufft_eps: float = 1e-4,
             opts: Optional[dict] = None) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
     """Equispaced Fourier Gaussian Process Regression for N-D data with optional variance estimation.
 
@@ -121,7 +122,6 @@ def efgp_nd(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
         # ---------- NUFFT Setup --------------------------------------
         with record_function("nufft_setup"):
             OUT        = (mtot,) * d
-            nufft_eps  = 1e-4
             xcen       = torch.zeros(d, device=device, dtype=rdtype)
             ## TODO I have no idea how contiguous works 
             phi_train  = (TWO_PI * h * (x      - xcen)).T.contiguous()
@@ -517,6 +517,7 @@ class EFGPND:
         kernel: object,
         sigmasq: float,
         eps: float,
+        nufft_eps: float = 1e-4,
         opts: Optional[Dict] = None,
     ):
         self.x        = x
@@ -527,6 +528,7 @@ class EFGPND:
         else:
             self.sigmasq = torch.tensor(sigmasq, dtype=torch.float64)
         self.eps      = eps
+        self.nufft_eps = nufft_eps
         self.opts     = {} if opts is None else opts
 
         # --- placeholders populated by `fit` -------------------------------------------------
@@ -557,6 +559,7 @@ class EFGPND:
             x_new    = self.x,               # ← predict on training set
             opts     = opts,
             do_profiling = False,
+            nufft_eps = self.nufft_eps,
         )
 
         self._beta       = beta
@@ -602,6 +605,7 @@ class EFGPND:
             x_new    = x_new,
             opts     = opts,
             do_profiling = False,
+            nufft_eps = self.nufft_eps,
         )
         mean = ytrg["mean"]
         var  = ytrg["var"] if return_variance else None
