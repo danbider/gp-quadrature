@@ -1,9 +1,11 @@
 import math
 import torch
 from typing import List
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field, field_validator
 
-class Matern(BaseModel):
+from .kernel import Kernel
+
+class Matern(Kernel):
     """
     Matérn kernel with different smoothness hyperparameters, specified by the name.
     Currently supports Matérn 1/2, 3/2, and 5/2.
@@ -15,9 +17,6 @@ class Matern(BaseModel):
     nu: float = Field(None)       # smoothness parameter, will be set in model_post_init
     num_hypers: int = Field(3, frozen=True)  # number of hyperparameters: lengthscale, variance, noise variance 
     hypers: List[str] = Field(default_factory=lambda: ['lengthscale', 'variance'], frozen=True)
-
-    class ConfigDict:
-        arbitrary_types_allowed = True
 
     def model_post_init(self, __context):
         """
@@ -117,28 +116,7 @@ class Matern(BaseModel):
         # Stack the gradients
         grad = torch.stack([dS_dlengthscale, dS_dvariance], dim=-1)
         return grad
-
-    def kernel_matrix(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """
-        Compute the kernel matrix K(x, y) for the Matern kernel.
         
-        Args:
-            x: first input tensor of shape (n, d) or (n,)
-            y: second input tensor of shape (m, d) or (m,)
-            
-        Returns:
-            kernel matrix K(x, y), tensor of shape (n, m)
-        """
-        # Ensure inputs are 2D
-        if x.ndim == 1:
-            x = x.unsqueeze(-1)
-        if y.ndim == 1:
-            y = y.unsqueeze(-1)
-            
-        # Compute pairwise distances between points
-        dist = torch.cdist(x, y)
-        return self.kernel(dist)
-    
     def log_marginal(self, x: torch.Tensor, y: torch.Tensor, sigmasq: float) -> float:
         """
         Compute the log marginal likelihood of the Matern kernel.
@@ -169,25 +147,3 @@ class Matern(BaseModel):
         
         # Return log marginal likelihood
         return -0.5 * (torch.dot(y, alpha) + logdet + x.shape[0] * math.log(2 * math.pi))
-    
-    def get_hyper(self, name: str) -> float:
-        """
-        Get hyperparameter value by name.
-        """
-        return getattr(self, name)
-    
-    def set_hyper(self, name: str, value: float) -> None:
-        """
-        Set hyperparameter value by name.
-        """
-        setattr(self, name, value)
-        
-    def iter_hypers(self):
-        """
-        Iterate through hyperparameters and their values.
-        
-        Returns:
-            Iterator of (name, value) tuples
-        """
-        for name in self.hypers:
-            yield name, getattr(self, name)
