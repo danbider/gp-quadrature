@@ -122,3 +122,23 @@ class Kernel(BaseModel):
             A new kernel instance with the same parameters
         """
         return self.__class__(**self.model_dump()) 
+        
+    def estimate_hyperparameters(self, x: torch.Tensor, y: torch.Tensor, K: int = 1000) -> Tuple[float, float, float]:
+        """
+        Estimate initial hyperparameters for GP model based on data characteristics.
+        
+        This is a base implementation that should be overridden by specific kernel classes
+        to provide kernel-specific hyperparameter estimation strategies.
+        
+        Args:
+            x: Input features tensor of shape (n, d)
+            y: Target values tensor of shape (n,)
+            K: Sample size for estimation (default: 1000)
+            
+        Returns:
+            Tuple containing:
+                - lengthscale: Estimated length scale
+                - variance: Estimated signal variance
+                - noise_var: Estimated noise variance
+        """
+        raise NotImplementedError("Subclasses should implement their own hyperparameter estimation strategy") 
