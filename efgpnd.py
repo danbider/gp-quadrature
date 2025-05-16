@@ -527,6 +527,10 @@ class EFGPND(nn.Module):
         self.eps      = eps
         self.nufft_eps = nufft_eps
         self.opts     = {} if opts is None else opts
+        
+        # Store data bounds for gradient computation
+        self.x0 = self.x.min(dim=0).values
+        self.x1 = self.x.max(dim=0).values
 
         # --- placeholders populated by `fit` -------------------------------------------------
         self._beta       = None        # Fourier weights
@@ -609,10 +613,9 @@ class EFGPND(nn.Module):
         self,
         *,
         trace_samples: int = 10,
-        x0: Optional[torch.Tensor] = None,
-        x1: Optional[torch.Tensor] = None,
         do_profiling: bool = False,
         nufft_eps: Optional[float] = None,
+        apply_gradients: bool = True,
         **kwargs
     ) -> torch.Tensor:
         """
@@ -625,12 +628,12 @@ class EFGPND(nn.Module):
         ----------
         trace_samples : int
             Number of Hutchinson trace samples to use
-        x0, x1 : Optional[torch.Tensor]
-            Min/max bounds of data (computed from data if not provided)
         do_profiling : bool
             Whether to profile the gradient computation
         nufft_eps : Optional[float]
             NUFFT accuracy (defaults to self.eps * 0.1)
+        apply_gradients : bool
+            If True, automatically apply gradients to model parameters (self._gp_params.raw)
             
         Returns
         -------
@@ -639,11 +642,6 @@ class EFGPND(nn.Module):
         """
         # Ensure parameters are synchronized
         self.sync_parameters()
-        
-        # Use data bounds if not provided
-        if x0 is None or x1 is None:
-            x0 = self.x.min(dim=0).values  
-            x1 = self.x.max(dim=0).values
         
         # Set default nufft_eps if not provided
         if nufft_eps is None:
@@ -656,7 +654,7 @@ class EFGPND(nn.Module):
             kernel=self.kernel,
             eps=self.eps,
             trace_samples=trace_samples,
-            x0=x0, x1=x1,
+            x0=self.x0, x1=self.x1,
             do_profiling=do_profiling,
             nufft_eps=nufft_eps,
             **kwargs
@@ -668,6 +666,10 @@ class EFGPND(nn.Module):
             grads[i].detach().to(self.device) * pos_vec[i]
             for i in range(len(grads))
         ], dim=0)
+        
+        # Automatically apply gradients if requested
+        if apply_gradients:
+            self._gp_params.raw.grad = raw_grad.clone()
         
         return raw_grad
 
@@ -760,8 +762,6 @@ class EFGPND(nn.Module):
         base_lr: float         = 0.05,         # base learning rate for auto-scaling
         max_iters: int         = 50,
         min_lengthscale: float = 5e-3,
-        x0: Optional[torch.Tensor] = None,     # Optional min bounds of data
-        x1: Optional[torch.Tensor] = None,     # Optional max bounds of data
         # --- profiling options -----------------------------------------
         profile_gradient: bool = False,        # Enable profiling of gradient computation
         profile_first_iter: bool = True,       # Profile only the first iteration
@@ -801,11 +801,6 @@ class EFGPND(nn.Module):
         init_kernel = self.kernel.model_copy()
         init_sigmasq = self._gp_params.sig2.detach().clone()
         
-        # data bounds
-        if x0 is None or x1 is None:
-            x0 = self.x.min(dim=0).values  
-            x1 = self.x.max(dim=0).values
-            
         logs = []                                       # ⇐ stored afterwards
 
         # Check if optimizer is a string
@@ -862,19 +857,18 @@ class EFGPND(nn.Module):
                         # b) compute gradients
                         raw_grad = self.compute_gradients(
                             trace_samples=5 if it < max_iters*0.8 else J,
-                            x0=x0, x1=x1,
                             do_profiling=profile_gradient and (
                                 (profile_first_iter and it == 0) or 
                                 (profile_last_iter and it == max_iters - 1) or
                                 (not profile_first_iter and not profile_last_iter)
                             ),
                             nufft_eps=EPSILON*0.1,
+                            apply_gradients=True,
                             **gkwargs
                         )
                         
                         # c) optimizer update
                         optimizer_instance.zero_grad()
-                        self._gp_params.raw.grad = raw_grad
                         optimizer_instance.step()
                         
                         # d) record history
@@ -918,7 +912,7 @@ class EFGPND(nn.Module):
                             kernel=self.kernel,
                             eps=EPSILON,
                             trace_samples=5 if it < max_iters*0.8 else J,
-                            x0=x0, x1=x1,
+                            x0=self.x0, x1=self.x1,
                             do_profiling=do_profile_this_iter,
                             **gkwargs,
                             nufft_eps=EPSILON*0.1
