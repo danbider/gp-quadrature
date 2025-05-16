@@ -1,4 +1,3 @@
-# efgp_wrapper.py
 from typing import Dict, Optional, Tuple
 
 import torch.nn.functional as nnf
@@ -13,7 +12,8 @@ import pytorch_finufft.functional as pff
 import numpy as np
 import math
 import torch.nn.functional as nnf
-
+from torch.optim import Adam
+from torch import nn
 from math import prod
 from typing import Dict, Optional, Callable
 from torch.fft import fftn, ifftn
@@ -59,6 +59,7 @@ def efgp_nd(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
             x_new: torch.Tensor,
             do_profiling: bool = False,
             nufft_eps: float = 1e-4,
+            rdtype: torch.dtype = torch.float32,
             opts: Optional[dict] = None) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
     """Equispaced Fourier Gaussian Process Regression for N-D data with optional variance estimation.
 
@@ -93,7 +94,7 @@ def efgp_nd(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
 
         # ---------- Casts & Devices ----------------------------------
         device  = x.device
-        rdtype  = torch.float64
+        rdtype  = rdtype
         cdtype  = _cmplx(rdtype)
         sigmasq_scalar = float(sigmasq)
         x       = x.to(device=device, dtype=rdtype)
@@ -118,7 +119,7 @@ def efgp_nd(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
             M         = xis.shape[0]
             spectral_vals = kernel.spectral_density(xis).to(dtype=cdtype)
             ws        = torch.sqrt(spectral_vals * (h ** d))               # (M,)
-
+            ws = ws.to(dtype=cdtype)
         # ---------- NUFFT Setup --------------------------------------
         with record_function("nufft_setup"):
             OUT        = (mtot,) * d
@@ -131,12 +132,16 @@ def efgp_nd(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
                 phi_in = phi_in.contiguous()
                 vals = vals.contiguous()
                 fk = pff.finufft_type1(phi_in, vals.to(dtype=cdtype), OUT, eps=nufft_eps, isign=-1, modeord=False)
+                if fk.dtype != cdtype:
+                    fk = fk.to(dtype=cdtype)
                 return fk.view(-1)
 
             def finufft2(phi_in, fk_flat):
                 phi_in = phi_in.contiguous()
                 fk_flat = fk_flat
                 fk_nd = fk_flat.view(OUT).to(dtype=cdtype).contiguous()
+                if fk_nd.dtype != cdtype:
+                    fk_nd = fk_nd.to(dtype=cdtype)
                 return pff.finufft_type2(phi_in, fk_nd, eps=nufft_eps, isign=+1, modeord=False)
 
         # ---------- RHS for Mean -------------------------------------
@@ -183,45 +188,29 @@ def efgp_nd(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
                 ytrg["var"] = torch.full((B,), float("nan"), device=device, dtype=rdtype)
             else:
                 if variance_method == "regular":
-                    # ---- exact CG ----------------------------------
-                    f_x   = torch.exp(TWO_PI * 1j * torch.matmul(x_new, xis.T))
-                    rhs_v = ws.unsqueeze(0) * f_x.conj()
-                    gamma = BatchConjugateGradients(A_var, rhs_v, x0=torch.zeros_like(rhs_v, dtype=cdtype),
-                                                    tol=cg_tol, early_stopping=True).solve()
-                    s2    = torch.real(torch.einsum('bm,m,bm->b', f_x, ws, gamma)).clamp_min_(0.0)
-                    ytrg["var"] = s2
+                    # ---- exact CG with microbatching for large x_new ----
+                    microbatch = 8192  # Adjust as needed for your hardware
+                    out = []
+                    for xb in torch.split(x_new, microbatch, dim=0):  # (b, d)
+                        fx = torch.exp(TWO_PI * 1j * (xb @ xis.T)).to(cdtype)  # (b, m)
+                        rhs = ws * fx.conj()  # (b, m)
+                        gamma = BatchConjugateGradients(
+                            A_var, rhs, x0=torch.zeros_like(rhs, dtype=cdtype),
+                            tol=cg_tol, early_stopping=True
+                        ).solve()  # (b, m)
+                        s2b = torch.real((fx * (ws * gamma)).sum(dim=-1)).clamp_min(0.0)  # (b,)
+                        out.append(s2b)
+                        del fx, rhs, gamma
+                    ytrg["var"] = torch.cat(out, dim=0)
 
-
-                    # microbatch = 2048
-                    # if device is None:
-                    #     device = x_new.device
-
-                    # xis   = xis.to(device)
-                    # ws    = ws.to(device)            # (m,)
-                    # out   = []                       # chunks to cat at the end
-                    # z0    = torch.zeros_like(ws, dtype=cdtype, device=device)  # template for CG
-
-                    # for xb in torch.split(x_new, microbatch, dim=0):           # (b,d)
-                    #     xb   = xb.to(device)
-
-                    #     # (b, m) – only this sub‑batch lives in memory
-                    #     fx   = torch.exp(TWO_PI * 1j * (xb @ xis.T)).to(cdtype)
-
-                    #     # rhs = diag(ws) ⋅ conj(fx)   – uses broadcasting, no extra copy
-                    #     rhs  = ws * fx.conj()
-
-                    #     γ    = BatchConjugateGradients(
-                    #                 A_var, rhs, x0=z0.expand_as(rhs),
-                    #                 tol=cg_tol, early_stopping=True
-                    #         ).solve()              # (b, m)
-
-                    #     s2b  = torch.real((fx * (ws * γ)).sum(dim=-1)).clamp_min(0.0)
-
-                    #     out.append(s2b.cpu())        # keep only the scalar result
-                    #     del fx, rhs, γ               # free GPU quickly
-                    #     torch.cuda.empty_cache()
-
-                    # ytrg["var"] = torch.cat(out, dim=0)
+                # if variance_method == "regular":
+                #     # ---- exact CG ----------------------------------
+                #     f_x   = torch.exp(TWO_PI * 1j * torch.matmul(x_new, xis.T))
+                #     rhs_v = ws.unsqueeze(0) * f_x.conj()
+                #     gamma = BatchConjugateGradients(A_var, rhs_v, x0=torch.zeros_like(rhs_v, dtype=cdtype),
+                #                                     tol=cg_tol, early_stopping=True).solve()
+                #     s2    = torch.real(torch.einsum('bm,m,bm->b', f_x, ws, gamma)).clamp_min_(0.0)
+                #     ytrg["var"] = s2
                 elif variance_method == "stochastic":
                     # ---- Hutchinson / FFT --------------------------
                     J = hutchinson_probes
@@ -243,7 +232,7 @@ def efgp_nd(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
 
 def efgpnd_gradient_batched(
         x, y, sigmasq, kernel, eps, trace_samples, x0, x1,
-        *, nufft_eps=1e-15, cg_tol = 1e-4, early_stopping = True, device=None, dtype=torch.float64,
+        *, nufft_eps=6e-8, cg_tol = 1e-4, early_stopping = True, device=None,
         do_profiling=False):
     """
     Gradient of the N‑D GP log‑marginal likelihood estimated with
@@ -274,8 +263,9 @@ def efgpnd_gradient_batched(
         with record_function("0_book_keeping"):
             device  = device or x.device
             # device = x.device
-            rdtype = torch.float64
-            cdtype = torch.complex128
+            dtype = x.dtype
+            rdtype = dtype 
+            cdtype = _cmplx(rdtype)
             x       = x.to(device, dtype)
             y       = y.to(device, dtype)
             if x.ndim == 1:
@@ -296,7 +286,7 @@ def efgpnd_gradient_batched(
             xis_1d, h, mtot = get_xis(kernel_obj=kernel, eps=eps, L=L, use_integral=True, l2scaled=False)
             grids = torch.meshgrid(*(xis_1d for _ in range(d)), indexing='ij') # makes tensor product Jm 
             xis = torch.stack(grids, dim=-1).view(-1, d) 
-            ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=torch.complex128) * h**d) # (mtot**d,1)
+            ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=cdtype) * h**d) # (mtot**d,1)
             Dprime  = (h**d * kernel.spectral_grad(xis)).to(cmplx)  # (M, 3)
 
         # 1)  NUFFT adjoint / forward helpers (modeord=False) -------------------
@@ -368,15 +358,7 @@ def efgpnd_gradient_batched(
 
         # 5)  Term‑2  (α*D'α, α*α) --------------------------------------------
         with record_function("5_compute_term2"):
-            # time this
-            # start_time = time.time()
-            # fadj_alpha = fadj(alpha).reshape(-1)
-            # print(f"Time taken to compute fadj(alpha): {time.time() - start_time} seconds")
-
-
-            # start_time = time.time()
             fadj_alpha = (Fy - toeplitz(ws * beta))/sigmasq # this is faster than fadj(alpha)
-            # print(f"Time taken to compute (Fy - toeplitz(ws * beta))/sigmasq: {time.time() - start_time} seconds")
             term2 = torch.stack((
                 torch.vdot(fadj_alpha, Dprime[:, 0] * fadj_alpha),
                 torch.vdot(fadj_alpha, Dprime[:, 1] * fadj_alpha),
@@ -386,42 +368,9 @@ def efgpnd_gradient_batched(
         # 6)  Monte‑Carlo trace (Term‑1) ---------------------------------------
         with record_function("6_monte_carlo_trace"):
             T  = trace_samples
-            # print(f"T: {T}")
-            # Use deterministic random numbers
-            rng_state = torch.get_rng_state()
-            if torch.cuda.is_available():
-                cuda_rng_state = torch.cuda.get_rng_state()
-            
-            # Generate Z with fixed seed for deterministic results
-            torch.manual_seed(42)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed(42)
-            
             Z  = (2 * torch.randint(0, 2, (T, x.shape[0]), device=device,
                                   dtype=dtype) - 1).to(cmplx) # (T, N)
-            
-            # Restore original random state
-            torch.set_rng_state(rng_state)
-            if torch.cuda.is_available():
-                torch.cuda.set_rng_state(cuda_rng_state)
-            
             fadjZ = fadj(Z)
-            # # time this
-            # # start_time = time.time()
-            # B_blocks, R_blocks = [], []
-            # for i in range(num_hypers):
-            #     # Dprime[:, i] * fadjZ.reshape(trace_samples,-1) should be shape (trace_samples, M)
-            #     rhs_i = fwd(Dprime[:, i] * fadjZ.reshape(int(trace_samples),-1)) if i < num_hypers - 1 else Z
-            #     R_blocks.append(rhs_i)
-            #     B_blocks.append(ws * fadj(rhs_i).reshape(int(trace_samples),-1))
-            # print(f"Time taken to compute B_blocks and R_blocks: {time.time() - start_time} seconds")
-            # time this
-            # start_time = time.time()
-
-
-            # B_all = torch.cat(B_blocks, 0)       # (num_hypers*T, M)
-            # R_all = torch.cat(R_blocks, 0)       # (num_hypers*T, N)
-
             ## Redone 
             fadjZ_flat = fadjZ.reshape(T, -1)              # (T, M)
             Hk = num_hypers -1
@@ -494,9 +443,56 @@ def efgpnd_gradient_batched(
     
     return grad.real  # returns in the same order as hypers in kernel class 
 
+# -----------------------------------------------------------------------------
+# Parameter container that wraps any kernel and a noise variance
+# -----------------------------------------------------------------------------
+class GPParams(nn.Module):
+    def __init__(self, kernel, init_sig2):
+        """
+        kernel: object exposing
+          - iter_hypers() -> yields (name, value)
+          - set_hyper(name, new_value)
+        init_sig2: initial noise variance (float or tensor)
+        """
+        super().__init__()
+        self.kernel = kernel
+        
+        # collect kernel hyper‐names & initial values
+        hypers = list(kernel.iter_hypers())
+        self.hypers_names = [name for name, _ in hypers]
+        init_vals = [float(val) for _, val in hypers]
+        init_vals.append(float(init_sig2))       # add noise variance last
+        
+        # raw = log of all positives, packed into one vector
+        init_raw = torch.log(torch.tensor(init_vals, dtype=torch.get_default_dtype()))
+        self.raw = nn.Parameter(init_raw)        # shape=(D+1,)
+    
+    @property
+    def pos(self):
+        "All positive parameters: kernel‐hypers followed by noise variance"
+        return self.raw.exp()                    # shape=(D+1,)
+    
+    @property
+    def sig2(self):
+        "Noise variance (last entry)"
+        return self.pos[-1]
+    
+    def sync_all_parameters(self):
+        """
+        Write current positive hypers back into self.kernel and return noise variance.
+        This consolidates both kernel hyperparameter and noise variance synchronization.
+        
+        Returns:
+            noise_variance: The current noise variance value
+        """
+        pos_vals = self.pos.detach().cpu().tolist()
+        # Update kernel hyperparameters
+        for i, name in enumerate(self.hypers_names):
+            self.kernel.set_hyper(name, pos_vals[i])
+        # Return noise variance
+        return self.sig2.detach().clone()
 
-
-class EFGPND:
+class EFGPND(nn.Module):
     """
     Equispaced‑Fourier Gaussian Process (EFGP) regression in d dimensions.
 
@@ -519,14 +515,15 @@ class EFGPND:
         eps: float,
         nufft_eps: float = 1e-4,
         opts: Optional[Dict] = None,
+        
     ):
+        super().__init__()  # Initialize nn.Module parent
+        
         self.x        = x
         self.y        = y
         self.kernel   = kernel
-        if isinstance(sigmasq, torch.Tensor):
-            self.sigmasq = sigmasq.detach().clone()
-        else:
-            self.sigmasq = torch.tensor(sigmasq, dtype=torch.float64)
+        self.rdtype   = x.dtype
+        self.device   = x.device
         self.eps      = eps
         self.nufft_eps = nufft_eps
         self.opts     = {} if opts is None else opts
@@ -539,7 +536,140 @@ class EFGPND:
         self._fitted     = False
         self.train_mean  = None        # f̂(x_i) on training set
         self._cache_full = None        # (beta, xis, ytrg, ws, toeplitz) for reuse
+        
+        # --- Set up parameters for optimization using GPParams ---
+        # Initialize and register parameters as part of the module
+        self._gp_params = GPParams(kernel, init_sig2=sigmasq)
+        
+        # Register GPParams as a submodule so it's parameters are accessible via parameters()
+        self.add_module("gp_params", self._gp_params)
+        
+        # Initial sync to ensure everything is in sync
+        self.sync_parameters()
+        
+        # Store registered optimizers
+        self._registered_optimizers = []
+    
+    def register_optimizer(self, optimizer):
+        """
+        Register an optimizer to automatically sync parameters after each step.
+        
+        This method adds hooks to the optimizer's step function to automatically
+        call sync_parameters() after each optimization step.
+        
+        Parameters
+        ----------
+        optimizer : torch.optim.Optimizer
+            The optimizer to register for automatic parameter synchronization
+            
+        Returns
+        -------
+        optimizer : torch.optim.Optimizer
+            The same optimizer, now with hooks for automatic syncing
+        """
+        # Skip if this optimizer is already registered
+        if optimizer in self._registered_optimizers:
+            return optimizer
+            
+        # Store original step function
+        original_step = optimizer.step
+        
+        # Create a new step function that calls sync_parameters after the original step
+        def step_with_sync(*args, **kwargs):
+            # Call the original step function
+            result = original_step(*args, **kwargs)
+            
+            # Sync parameters back to kernel using the consolidated method
+            self.sync_parameters()
+            
+            return result
+            
+        # Replace the optimizer's step function with our new one
+        optimizer.step = step_with_sync
+        
+        # Store the optimizer to avoid registering it multiple times
+        self._registered_optimizers.append(optimizer)
+        
+        return optimizer
 
+    @property
+    def sigmasq(self) -> torch.Tensor:
+        """Get the current noise variance tensor from GPParams"""
+        return self._gp_params.sig2.detach().clone()
+    
+    def sync_parameters(self):
+        """
+        Synchronize parameters between GPParams, kernel, and sigmasq.
+        Call this after manual parameter updates to ensure consistency.
+        """
+        self._internal_sigmasq = self._gp_params.sync_all_parameters()
+        return self
+        
+    def compute_gradients(
+        self,
+        *,
+        trace_samples: int = 10,
+        x0: Optional[torch.Tensor] = None,
+        x1: Optional[torch.Tensor] = None,
+        do_profiling: bool = False,
+        nufft_eps: Optional[float] = None,
+        **kwargs
+    ) -> torch.Tensor:
+        """
+        Compute gradient of the negative log marginal likelihood with respect to hyperparameters.
+        
+        This method computes the gradients for manual optimization approaches, where users want
+        to use their own optimization routine (like torch optimizers).
+        
+        Parameters
+        ----------
+        trace_samples : int
+            Number of Hutchinson trace samples to use
+        x0, x1 : Optional[torch.Tensor]
+            Min/max bounds of data (computed from data if not provided)
+        do_profiling : bool
+            Whether to profile the gradient computation
+        nufft_eps : Optional[float]
+            NUFFT accuracy (defaults to self.eps * 0.1)
+            
+        Returns
+        -------
+        grads : torch.Tensor
+            Gradients for kernel hyperparameters and sigmasq in log space
+        """
+        # Ensure parameters are synchronized
+        self.sync_parameters()
+        
+        # Use data bounds if not provided
+        if x0 is None or x1 is None:
+            x0 = self.x.min(dim=0).values  
+            x1 = self.x.max(dim=0).values
+        
+        # Set default nufft_eps if not provided
+        if nufft_eps is None:
+            nufft_eps = self.eps * 0.1
+            
+        # Compute gradients with respect to the original parameters
+        grads = efgpnd_gradient_batched(
+            self.x, self.y,
+            sigmasq=self._gp_params.sig2,
+            kernel=self.kernel,
+            eps=self.eps,
+            trace_samples=trace_samples,
+            x0=x0, x1=x1,
+            do_profiling=do_profiling,
+            nufft_eps=nufft_eps,
+            **kwargs
+        )
+        
+        # Transform to raw space gradient via chain rule: ∂L/∂raw_i = (∂L/∂param_i) * param_i
+        pos_vec = self._gp_params.pos.to(self.device)
+        raw_grad = torch.stack([
+            grads[i].detach().to(self.device) * pos_vec[i]
+            for i in range(len(grads))
+        ], dim=0)
+        
+        return raw_grad
 
     def fit(self) -> "EFGPND":
         """
@@ -549,17 +679,21 @@ class EFGPND:
         # We only need the mean here; keep variance off for speed
         opts = dict(self.opts)               # shallow copy
         opts.setdefault("estimate_variance", False)
-
+        
+        # Ensure parameters are synchronized
+        self.sync_parameters()
+        
         beta, xis, ytrg, ws, toeplitz = efgp_nd(
             x        = self.x,
             y        = self.y,
-            sigmasq  = self.sigmasq,
+            sigmasq  = self._gp_params.sig2,
             kernel   = self.kernel,
             eps      = self.eps,
             x_new    = self.x,               # ← predict on training set
             opts     = opts,
             do_profiling = False,
             nufft_eps = self.nufft_eps,
+            rdtype = torch.float32
         )
 
         self._beta       = beta
@@ -588,6 +722,9 @@ class EFGPND:
         if not self._fitted:
             raise RuntimeError("Call `.fit()` before `.predict()`.")
 
+        # Ensure parameters are synchronized
+        self.sync_parameters()
+        
         # Re‑use what we have; toggle variance computation only
         opts = dict(self.opts)
         opts.update(
@@ -599,7 +736,7 @@ class EFGPND:
         _, _, ytrg, _ws, _T = efgp_nd(
             x        = self.x,
             y        = self.y,
-            sigmasq  = self.sigmasq,
+            sigmasq  = self._gp_params.sig2,
             kernel   = self.kernel,
             eps      = self.eps,
             x_new    = x_new,
@@ -617,7 +754,8 @@ class EFGPND:
         # --- search grid ------------------------------------------------
         epsilon_values         = (1e-2,),      # quadrature accuracy grid
         trace_samples_values   = (10,),        # Hutchinson probes grid
-        # --- SGD options -----------------------------------------------
+        # --- optimization options ---------------------------------------
+        optimizer              = 'Adam',         # optional optimizer (e.g., 'Adam' or Adam instance)
         lr: Optional[float]    = None,         # learning rate (will be auto-scaled if None)
         base_lr: float         = 0.05,         # base learning rate for auto-scaling
         max_iters: int         = 50,
@@ -632,24 +770,36 @@ class EFGPND:
         **gkwargs,                             # forwarded to efgpnd_gradient_batched
     ):
         """
-        Simple SGD for now 
+        Optimize hyperparameters using either vanilla SGD or a provided optimizer.
+        
+        
+        Parameters
+        ----------
+        optimizer : optional
+            If provided, uses the enhanced optimization scheme with GPParams.
+            Can be either:
+            - String: 'Adam' for Adam optimizer
+            - Optimizer instance: direct optimizer object to use
+            - None: Uses vanilla SGD optimization
         """
         device = self.x.device
-        rdtype = torch.float64
+        rdtype = self.x.dtype
 
-        # TODO idk really what to do with the lr 
         # Auto-scale learning rate  
         n_samples = self.x.shape[0]
         if lr is None:
-            # Scale learning rate inversely with number of samples
-            # Use a non-linear scaling that prevents extremely small learning rates for very large datasets
-            # and provides a smoother transition between dataset sizes
-            lr = base_lr / (1.0 + math.sqrt(n_samples / 100.0))
-            print(f"Auto-scaled learning rate: {lr:.6f} (base_lr={base_lr}, n_samples={n_samples})")
+            if optimizer == 'Adam':
+                lr = 1e-1
+            else:
+                # Scale learning rate inversely with number of samples
+                # Use a non-linear scaling that prevents extremely small learning rates for very large datasets
+                # and provides a smoother transition between dataset sizes
+                lr = base_lr / (1.0 + math.sqrt(n_samples / 100.0))
+                print(f"Auto-scaled learning rate: {lr:.6f} (base_lr={base_lr}, n_samples={n_samples})")
 
-        init_kernel = self.kernel                       # keep original ref
-        best_state  = None                              # for early stopping
-        best_obj    = float("inf")
+        # Store original kernel and parameters
+        init_kernel = self.kernel.model_copy()
+        init_sigmasq = self._gp_params.sig2.detach().clone()
         
         # data bounds
         if x0 is None or x1 is None:
@@ -658,93 +808,164 @@ class EFGPND:
             
         logs = []                                       # ⇐ stored afterwards
 
+        # Check if optimizer is a string
+        use_enhanced_opt = optimizer is not None
+        
         for EPSILON in epsilon_values:
             for J in trace_samples_values:
-
-                # fresh copy of kernel & noise each hypergrid setting
-                kernel  = init_kernel.model_copy()
-                sigmasq = self.sigmasq.clone().detach()                
-
-                start   = time.time()
-                lr_curr = lr
-
+                # Reset kernel and sigmasq for this grid setting
+                self.kernel = init_kernel.model_copy()
+                self._gp_params = GPParams(self.kernel, init_sig2=init_sigmasq.item()).to(device)
+                
+                # Re-register the GPParams module
+                if hasattr(self, "gp_params"):
+                    delattr(self, "gp_params")
+                self.add_module("gp_params", self._gp_params)
+                
+                start = time.time()
+                
                 # Track hyperparameters for logging
-                tracked_hypers = {name: [] for name in kernel.hypers}
+                tracked_hypers = {name: [] for name in self.kernel.hypers}
                 tracked_hypers['sigmasq'] = []  # Add noise parameter separately
-
-                for it in range(max_iters):
-                    # ---- bookkeeping --------------------------------------------------
-                    # Record current values of all hyperparameters
-                    for name, value in kernel.iter_hypers():
-                        tracked_hypers[name].append(float(value))
-                    tracked_hypers['sigmasq'].append(float(sigmasq))
-
-                    # ---- gradient ------------------------------------------------------
-                    # Determine if we should profile this iteration
-                    do_profile_this_iter = profile_gradient and (
-                        (profile_first_iter and it == 0) or 
-                        (profile_last_iter and it == max_iters - 1) or
-                        (not profile_first_iter and not profile_last_iter)
-                    )
+                
+                # ---- Optimize using the provided optimizer or vanilla SGD -----
+                if use_enhanced_opt:
+                    # ------ Enhanced optimization with GPParams -------
                     
-                    if it < max_iters*0.8:
+                    # Create optimizer based on the optimizer parameter
+                    if isinstance(optimizer, str):
+                        if optimizer.lower() == 'adam':
+                            optimizer_instance = Adam(self.parameters(), lr=lr)
+                        else:
+                            raise ValueError(f"Unsupported optimizer string: {optimizer}. Currently supporting: 'adam'")
+                    else:
+                        # Use the provided optimizer directly
+                        optimizer_instance = optimizer
+                    
+                    # Register the optimizer for automatic parameter syncing
+                    self.register_optimizer(optimizer_instance)
+                    
+                    # Prepare names for tracking
+                    names = self._gp_params.hypers_names + ["sigmasq"]
+                    history = {n: [] for n in names}
+                    
+                    # Optimization loop
+                    for it in range(max_iters):
+                        # Record current values of all hyperparameters for tracking
+                        for name, value in self.kernel.iter_hypers():
+                            tracked_hypers[name].append(float(value))
+                        tracked_hypers['sigmasq'].append(float(self._gp_params.sig2.item()))
+                        
+                        # a) sync current hypers back to kernel
+                        self.sync_parameters()
+                        
+                        # b) compute gradients
+                        raw_grad = self.compute_gradients(
+                            trace_samples=5 if it < max_iters*0.8 else J,
+                            x0=x0, x1=x1,
+                            do_profiling=profile_gradient and (
+                                (profile_first_iter and it == 0) or 
+                                (profile_last_iter and it == max_iters - 1) or
+                                (not profile_first_iter and not profile_last_iter)
+                            ),
+                            nufft_eps=EPSILON*0.1,
+                            **gkwargs
+                        )
+                        
+                        # c) optimizer update
+                        optimizer_instance.zero_grad()
+                        self._gp_params.raw.grad = raw_grad
+                        optimizer_instance.step()
+                        
+                        # d) record history
+                        pos_list = self._gp_params.pos.detach().cpu().tolist()
+                        for name, val in zip(names, pos_list):
+                            history[name].append(val)
+                        
+                        # f) optional logging
+                        if it % 10 == 0:
+                            # Get current values for printing
+                            lengthscale = self.kernel.get_hyper('lengthscale')
+                            variance = self.kernel.get_hyper('variance')
+                            print(f"[ε={EPSILON} | J={J}] iter {it:>3}  "
+                                f"ℓ={lengthscale:.4g}  "
+                                f"σ_f²={variance:.4g}  σ_n²={self._gp_params.sig2.item():.4g}")
+                            print(f"grad: {raw_grad}")
+
+
+                ## TODO can probably remove this        
+                else:
+                    # ------ Original SGD implementation -------
+                    lr_curr = lr
+                    
+                    for it in range(max_iters):
+                        # Record current values of all hyperparameters
+                        for name, value in self.kernel.iter_hypers():
+                            tracked_hypers[name].append(float(value))
+                        tracked_hypers['sigmasq'].append(float(self._gp_params.sig2.item()))
+                        
+                        # Determine profiling
+                        do_profile_this_iter = profile_gradient and (
+                            (profile_first_iter and it == 0) or 
+                            (profile_last_iter and it == max_iters - 1) or
+                            (not profile_first_iter and not profile_last_iter)
+                        )
+                        
+                        # Get gradients in the original way (not using raw_grad)
                         grad = efgpnd_gradient_batched(
-                            self.x, self.y, sigmasq, kernel,
-                            EPSILON,
-                            trace_samples = 5,
-                            x0 = x0, x1 = x1,
-                            do_profiling = do_profile_this_iter,
+                            self.x, self.y, 
+                            sigmasq=self._gp_params.sig2,
+                            kernel=self.kernel,
+                            eps=EPSILON,
+                            trace_samples=5 if it < max_iters*0.8 else J,
+                            x0=x0, x1=x1,
+                            do_profiling=do_profile_this_iter,
                             **gkwargs,
                             nufft_eps=EPSILON*0.1
                         )
-                    else: 
-                        grad = efgpnd_gradient_batched(
-                            self.x, self.y, sigmasq, kernel,
-                            EPSILON,
-                            trace_samples = J,
-                            x0 = x0, x1 = x1,
-                            do_profiling = do_profile_this_iter,
-                            **gkwargs,
-                            nufft_eps=EPSILON*0.1
-                        )                    
-                    # Update kernel hyperparameters. Doing everything in the log space 
-                    # so that unconstrained optimization
-                    # Note -- the order of the hypers in the gradient is the same as the order in the kernel.iter_hypers()
-                    for i, (name, value) in enumerate(kernel.iter_hypers()):
-                        # Apply log-space update to avoid negative values
-                        #TODO are there ever negative values for these hypers idk 
-                        new_value = math.exp(math.log(value) - lr_curr * value * grad[i].item())
                         
-                        # Apply minimum value constraints based on hyperparameter
-                        # TODO is this the same for all kernels? 
-                        if name == 'lengthscale':
-                            new_value = max(new_value, min_lengthscale)
-                        else:
-                            new_value = max(new_value, 1e-5)
+                        # Update kernel hyperparameters directly
+                        for i, (name, value) in enumerate(self.kernel.iter_hypers()):
+                            # Apply log-space update to avoid negative values
+                            new_value = math.exp(math.log(value) - lr_curr * value * grad[i].item())
                             
-                        # Update the hyperparameter
-                        kernel.set_hyper(name, new_value)
-                    
-                    # Update noise parameter (sigmasq) separately. It's not listed in kernel.hypers since it's common to all kernels
-                    new_noise = math.exp(math.log(sigmasq.item()) - lr_curr * sigmasq.item() * grad[-1].item())
-                    sigmasq = torch.tensor(max(new_noise, 1e-5), dtype=rdtype, device=device)
+                            # Apply minimum value constraints based on hyperparameter
+                            if name == 'lengthscale':
+                                new_value = max(new_value, min_lengthscale)
+                            else:
+                                new_value = max(new_value, 1e-5)
+                                
+                            # Update the hyperparameter directly
+                            self.kernel.set_hyper(name, new_value)
+                            
+                            # Also update the corresponding raw parameter in _gp_params
+                            with torch.no_grad():
+                                self._gp_params.raw[i] = torch.log(torch.tensor(new_value, dtype=rdtype, device=device))
+                        
+                        # Update noise parameter directly
+                        new_noise = math.exp(math.log(self._gp_params.sig2.item()) - lr_curr * self._gp_params.sig2.item() * grad[-1].item())
+                        new_noise = max(new_noise, 1e-5)
+                        
+                        # Update the parameter in _gp_params
+                        with torch.no_grad():
+                            self._gp_params.raw[-1] = torch.log(torch.tensor(new_noise, dtype=rdtype, device=device))
+                        
+                        # No need to call sync_parameters() since we've updated both the kernel and _gp_params directly
+                        
+                        # adaptive LR guard against runaway ℓ
+                        if it < 3 and self.kernel.get_hyper('lengthscale') < 0.05:
+                            lr_curr *= 0.5
+                        
+                        if it % 10 == 0:
+                            # Get current values for printing
+                            lengthscale = self.kernel.get_hyper('lengthscale')
+                            variance = self.kernel.get_hyper('variance')
+                            print(f"[ε={EPSILON} | J={J}] iter {it:>3}  "
+                                f"ℓ={lengthscale:.4g}  "
+                                f"σ_f²={variance:.4g}  σ_n²={self._gp_params.sig2.item():.4g}")
+                            print(f"grad: {grad}")
 
-                    # adaptive LR guard against runaway ℓ
-                    # TODO again 
-                    if it < 3 and kernel.get_hyper('lengthscale') < 0.05:
-                        lr_curr *= 0.5
-
-                    if it % 10 == 0:
-                        # Get current values for printing
-                        lengthscale = kernel.get_hyper('lengthscale')
-                        variance = kernel.get_hyper('variance')
-                        print(f"[ε={EPSILON} | J={J}] iter {it:>3}  "
-                            f"ℓ={lengthscale:.4g}  "
-                            f"σ_f²={variance:.4g}  σ_n²={sigmasq:.4g}")
-                        print(f"grad: {grad}")
-
-                # ---- one full objective eval (optional) -------------------------------
-                obj = float("nan")       # <- plug in closed‑form log‑marg if available
+                # ---- Store log information -------------------------------
                 elapsed = time.time() - start
 
                 logs.append({
@@ -756,22 +977,17 @@ class EFGPND:
                     "tracked_noise"      : tracked_hypers.get('sigmasq', []),
                     "iters"              : max_iters,
                     "time_sec"           : elapsed,
-                    "final_kernel"       : kernel,
-                    "final_noise"        : sigmasq,
-                    "objective"          : obj,
+                    "final_kernel"       : self.kernel.model_copy(),
+                    "final_noise"        : self._gp_params.sig2.detach().clone(),
+                    "objective"          : float("nan"),  # No closed-form objective available
                 })
-
-                best_state = (kernel, sigmasq)
 
                 print(f"└─ finished ε={EPSILON}, J={J} in {elapsed:.1f}s")
 
         # ----------------------------------------------------------------
-        # stash results & update model
+        # store results in the model
         # ----------------------------------------------------------------
-        self.training_log = logs                           # everything
-        if best_state is not None:
-            self.kernel, self.sigmasq = best_state         # take best
-
+        self.training_log = logs
         return self   # so you can chain: model.optimize_hyperparameters(...).fit()
 
 
@@ -1035,7 +1251,7 @@ class ToeplitzND:
             batch_shape = x.shape[:-1]
             x = x.reshape(*batch_shape, *self.ns)
         elif list(x.shape[-self.d:]) == self.ns:  # block batch
-            batch_shape = x.shape[:-self.d]
+            batch_shape = x.shape[:-len(self.ns)]
         else:
             raise ValueError(
                 f"Expected trailing dim {self.size} or block {tuple(self.ns)}, "
@@ -1044,7 +1260,7 @@ class ToeplitzND:
 
         # --- Convert to complex if necessary ---
         if not x.is_complex():
-            x = x.to(dtype=torch.complex128)
+            x = x.to(dtype=self.dtype)
 
         # --- Create padding values ---
         pad = []
@@ -1091,7 +1307,7 @@ def compute_convolution_vector_vectorized_dD(m: int, x: torch.Tensor, h: float) 
     if x.ndim == 1:
         x = x[:, None]
     N, d        = x.shape
-    eps         = 1e-15
+    eps         = 6e-8
 
     # (d, N) array of phases
     phi = (2 * math.pi * h * x).T.contiguous().to(dtype_real)
@@ -1135,7 +1351,7 @@ def compute_gradients_truncated(x, y, sigmasq, kernel, EPSILON):
     # y = y.to(dtype=torch.float64).flatten()     # shape: (N,)
     # x_new = torch.linspace(0, 5, 1000, dtype=torch.float64)
     d = x.shape[1]
-    
+    cdtype = _cmplx(x.dtype)
     x0 = x.min(dim=0).values  
     x1 = x.max(dim=0).values  
 
@@ -1147,9 +1363,9 @@ def compute_gradients_truncated(x, y, sigmasq, kernel, EPSILON):
     # print(xis_1d.shape)
     grids = torch.meshgrid(*(xis_1d for _ in range(d)), indexing='ij') # makes tensor product Jm 
     xis = torch.stack(grids, dim=-1).view(-1, d) 
-    ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=torch.complex128) * h**d) # (mtot**d,1)
+    ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=cdtype) * h**d) # (mtot**d,1)
 
-    D = torch.diag(ws).to(dtype=torch.complex128)         # D: (M, M)
+    D = torch.diag(ws).to(dtype=cdtype)         # D: (M, M)
 
     # Form design features F (N x M): F[n,m] = exp(2pi i * xis[m] * x[n])
     # F = torch.exp(1j * 2 * math.pi * torch.outer(x, xis)).to(dtype=torch.complex128)
@@ -1158,11 +1374,11 @@ def compute_gradients_truncated(x, y, sigmasq, kernel, EPSILON):
     # Compute approximate kernel: K = F * D^2 * F^*.
     D2 = D @ D  # This is just diag(ws^2)
     K = F @ D2 @ F.conj().transpose(-2, -1)  # shape: (N, N)
-    C = K + sigmasq * torch.eye(N, dtype=torch.complex128)  # add noise term
+    C = K + sigmasq * torch.eye(N, dtype=cdtype)  # add noise term
 
     # Directly invert C and compute alpha.
     C_inv = torch.linalg.inv(C)
-    alpha = C_inv @ y.to(dtype=torch.complex128)  # shape: (N,)
+    alpha = C_inv @ y.to(dtype=cdtype)  # shape: (N,)
 
     # Compute derivative of the kernel with respect to the kernel hyperparameters.
     # Let spectral_grad = kernel.spectral_grad(xis), shape: (M, n_params)
@@ -1172,15 +1388,15 @@ def compute_gradients_truncated(x, y, sigmasq, kernel, EPSILON):
     dK_dtheta_list = []
     n_params = spectral_grad.shape[1]
     for i in range(n_params):
-        dK_i = F @ torch.diag((h**d * spectral_grad[:, i]).to(dtype=torch.complex128)) @ F.conj().transpose(-2, -1)
+        dK_i = F @ torch.diag((h**d * spectral_grad[:, i]).to(dtype=cdtype)) @ F.conj().transpose(-2, -1)
         dK_dtheta_list.append(dK_i)
     # The derivative with respect to the noise parameter is simply the identity.
-    dK_dtheta_list.append(torch.eye(N, dtype=torch.complex128))
+    dK_dtheta_list.append(torch.eye(N, dtype=cdtype))
     n_total = n_params + 1
 
     # Compute gradient for each hyperparameter using:
     # grad = 0.5 * [trace(C_inv * dK/dtheta) - alpha^H * (dK/dtheta) * alpha]
-    grad = torch.zeros(n_total, dtype=torch.complex128)
+    grad = torch.zeros(n_total, dtype=cdtype)
     for i in range(n_total):
         if i < n_params:
             term1 = torch.trace(C_inv @ dK_dtheta_list[i])
@@ -1224,7 +1440,7 @@ def negative_log_marginal_likelihood(x, y, lengthscale, variance, noise):
         y = y.unsqueeze(1)
     n = x.shape[0]
     # Compute kernel matrix K(X,X) and add noise on the diagonal.
-    K = squared_exponential_kernel(x, x, lengthscale, variance) + noise * torch.eye(n, dtype=torch.float64)
+    K = squared_exponential_kernel(x, x, lengthscale, variance) + noise * torch.eye(n, dtype=x.dtype)
     # Compute Cholesky factorization of K.
     L = torch.linalg.cholesky(K)
     # Solve for alpha = K^{-1} y using the Cholesky factors.
@@ -1243,8 +1459,8 @@ def compute_gradients_vanilla(x, y, sigmasq, kernel):
 
     # -------------------------
     # 2. Define hyperparameters as torch tensors with gradients.
-    lengthscale = torch.tensor(kernel.lengthscale, dtype=torch.float64, requires_grad=True)
-    variance    = torch.tensor(kernel.variance, dtype=torch.float64, requires_grad=True)
+    lengthscale = torch.tensor(kernel.lengthscale, dtype=x.dtype, requires_grad=True)
+    variance    = torch.tensor(kernel.variance, dtype=x.dtype, requires_grad=True)
     noise       = sigmasq.clone().detach().requires_grad_(True)
 
     # -------------------------
@@ -1263,4 +1479,5 @@ def compute_gradients_vanilla(x, y, sigmasq, kernel):
     # print("  dNLL/d(noise)       =", noise.grad.item())
     grad = torch.tensor([lengthscale.grad.item(), variance.grad.item(), noise.grad.item()])
 
-    return grad.to(dtype=torch.float64)
+    return grad.to(dtype=x.dtype)
+
