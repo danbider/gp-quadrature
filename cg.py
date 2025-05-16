@@ -32,7 +32,8 @@ class ConjugateGradients:
         if isinstance(A_apply_function, torch.Tensor):
             dtype = A_apply_function.dtype
         else:
-            dtype = torch.complex128 # for the FFTs in the complex case
+            dtype = x0.dtype
+            # dtype = torch.complex128 # for the FFTs in the complex case
         
         self.b = b.to(dtype=dtype, device=device)
         self.x0 = x0.to(dtype=dtype, device=device)

@@ -11,10 +11,58 @@ from matplotlib.colors import Normalize
 from scipy.interpolate import griddata
 from matplotlib.lines import Line2D
 import time
+from torch import nn
+from torch.optim import Adam
+import sys
+import os
+
+# Add the parent directory to the path so we can import efgpnd
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kernels.squared_exponential import SquaredExponential
 from kernels.matern import Matern
 from efgpnd import EFGPND
+from efgpnd import efgpnd_gradient_batched
+
+# -----------------------------------------------------------------------------
+# Parameter container that wraps any kernel and a noise variance
+# -----------------------------------------------------------------------------
+class GPParams(nn.Module):
+    def __init__(self, kernel, init_sig2):
+        """
+        kernel: object exposing
+          - iter_hypers() -> yields (name, value)
+          - set_hyper(name, new_value)
+        init_sig2: initial noise variance (float or tensor)
+        """
+        super().__init__()
+        self.kernel = kernel
+        
+        # collect kernel hyper‐names & initial values
+        hypers = list(kernel.iter_hypers())
+        self.hypers_names = [name for name, _ in hypers]
+        init_vals = [float(val) for _, val in hypers]
+        init_vals.append(float(init_sig2))       # add noise variance last
+        
+        # raw = log of all positives, packed into one vector
+        init_raw = torch.log(torch.tensor(init_vals, dtype=torch.get_default_dtype()))
+        self.raw = nn.Parameter(init_raw)        # shape=(D+1,)
+    
+    @property
+    def pos(self):
+        "All positive parameters: kernel‐hypers followed by noise variance"
+        return self.raw.exp()                    # shape=(D+1,)
+    
+    @property
+    def sig2(self):
+        "Noise variance (last entry)"
+        return self.pos[-1]
+    
+    def sync_kernel(self):
+        "Write current positive hypers back into self.kernel"
+        pos_vals = self.pos.detach().cpu().tolist()
+        for i, name in enumerate(self.hypers_names):
+            self.kernel.set_hyper(name, pos_vals[i])
 
 def load_data(filepath):
     """Load the temperature data."""
@@ -45,16 +93,13 @@ def train_gp_model(x, y, kernel, sigmasq=5, epsilon=1e-4, max_iters=50):
     # Optimize hyperparameters
     start_time = time.time()
     
-    # Track per-iteration timing and hyperparameters
-    iteration_params = []
-    
-    # Optimize hyperparameters without the callback parameter
+    # Use the Adam optimizer with internal GPParams for enhanced training
     model.optimize_hyperparameters(
         epsilon_values=[epsilon],
-        trace_samples_values=[20],
+        trace_samples_values=[10],
+        optimizer='Adam',  # Use Adam optimizer directly by passing a string
         max_iters=max_iters,
-        base_lr=0.005,
-        x0=x0, x1=x1  # Pass the data bounds for optimization
+        x0=x0, x1=x1
     )
     
     end_time = time.time()
@@ -63,15 +108,16 @@ def train_gp_model(x, y, kernel, sigmasq=5, epsilon=1e-4, max_iters=50):
     # Fit the model
     model.fit()
     
-    # Extract trajectory of hyperparameters from the training log after optimization
-    trajectory = None
-    if hasattr(model, 'training_log') and model.training_log:
-        log = model.training_log[0]  # Only one epsilon and trace_samples setting
+    # Extract hyperparameter trajectory from the training log
+    trajectory = {}
+    if hasattr(model, 'training_log') and len(model.training_log) > 0:
+        log = model.training_log[0]  # Get the first log entry
         trajectory = {
-            'lengthscale': log['tracked_lengthscale'],
-            'variance': log['tracked_variance'],
+            'lengthscale': log.get('tracked_lengthscale', []),
+            'variance': log.get('tracked_variance', []),
+            'sigmasq': log.get('tracked_noise', []),
             'total_time': total_time,
-            'iteration_params': log['tracked_hyperparameters']
+            'iteration_params': log.get('tracked_hyperparameters', {})
         }
     
     return model, trajectory
@@ -747,7 +793,7 @@ def plot_epsilon_subplots(kernel_type, landscape_data, model_results, figsize=(1
 
 def main():
     # Load the USA temperature data
-    data = load_data('usa_temp_data.pt')
+    data = load_data('data/usa_temp_data.pt')
     x = data['x']  # Scaled coordinates
     y = data['y']  # Temperature values
     x_unscaled = data.get('x_unscaled', x)  # Original lat/lon coordinates if available
