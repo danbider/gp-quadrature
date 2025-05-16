@@ -222,6 +222,7 @@ def efgp_nd(x: torch.Tensor, y: torch.Tensor, sigmasq: float,
                     raise ValueError("variance_method must be 'regular' or 'stochastic'")
 
         # ---------- Optional Log Marginal -----------------------------
+        ## TODO: implement this efficiently
         if opts.get("get_log_marginal_likelihood", False):
             ytrg["log_marginal_likelihood"] = torch.tensor(float("nan"), device=device, dtype=rdtype)
 
@@ -511,26 +512,86 @@ class EFGPND(nn.Module):
         x: torch.Tensor,
         y: torch.Tensor,
         kernel: object,
-        sigmasq: float,
-        eps: float,
+        sigmasq: float = None,
+        eps: float = 1e-2,
         nufft_eps: float = 1e-4,
         opts: Optional[Dict] = None,
+        estimate_params: bool = True,
         
     ):
         super().__init__()  # Initialize nn.Module parent
         
         self.x        = x
         self.y        = y
-        self.kernel   = kernel
         self.rdtype   = x.dtype
         self.device   = x.device
         self.eps      = eps
         self.nufft_eps = nufft_eps
         self.opts     = {} if opts is None else opts
         
+        # Handle string kernel specification
+        if isinstance(kernel, str):
+            # Import kernel classes here to avoid circular imports
+            from kernels.squared_exponential import SquaredExponential
+            from kernels.matern import Matern32, Matern52
+            
+            # Get the dimension from the input data
+            if x.ndim == 1:
+                dimension = 1
+            else:
+                dimension = x.shape[1]
+                
+            # Create the kernel based on the string identifier
+            kernel_map = {
+                "SquaredExponential": SquaredExponential,
+                "SE": SquaredExponential,
+                "RBF": SquaredExponential,
+                "Matern32": Matern32,
+                "Matern52": Matern52
+            }
+            
+            if kernel not in kernel_map:
+                raise ValueError(f"Unknown kernel string: {kernel}. Available options: {list(kernel_map.keys())}")
+            
+            # Create kernel with default parameters (will be estimated)
+            kernel_class = kernel_map[kernel]
+            
+            # Start with default values that will be overridden by estimation
+            kernel = kernel_class(dimension=dimension, lengthscale=1.0, variance=1.0)
+            
+            # Force parameter estimation when kernel is specified as string
+            estimate_params = True
+            
+        self.kernel = kernel
+        
         # Store data bounds for gradient computation
         self.x0 = self.x.min(dim=0).values
         self.x1 = self.x.max(dim=0).values
+
+        # Estimate hyperparameters if needed
+        if estimate_params and (sigmasq is None or hasattr(kernel, 'estimate_hyperparameters')):
+            try:
+                # Try to estimate hyperparameters using the kernel's method
+                estimated_lengthscale, estimated_variance, estimated_sigmasq = kernel.estimate_hyperparameters(x, y)
+                
+                # Update kernel hyperparameters if they should be estimated
+                if hasattr(kernel, 'lengthscale'):
+                    kernel.lengthscale = estimated_lengthscale
+                if hasattr(kernel, 'variance'):
+                    kernel.variance = estimated_variance
+                
+                # Use estimated noise variance if none was provided
+                if sigmasq is None:
+                    sigmasq = estimated_sigmasq
+            except NotImplementedError:
+                # If the kernel doesn't implement the method, use a default value
+                if sigmasq is None:
+                    # Default to 10% of the variance of y
+                    sigmasq = 0.1 * torch.var(y).item()
+
+        # If sigmasq is still None, use a default value
+        if sigmasq is None:
+            sigmasq = 0.1 * torch.var(y).item()
 
         # --- placeholders populated by `fit` -------------------------------------------------
         self._beta       = None        # Fourier weights

@@ -1,6 +1,6 @@
 import math
 import torch
-from typing import List
+from typing import List, Tuple
 from pydantic import Field
 
 from .kernel import Kernel
@@ -102,4 +102,55 @@ class SquaredExponential(Kernel):
         
         # Return log marginal likelihood
         return -0.5 * (torch.dot(y, alpha) + logdet + x.shape[0] * math.log(2 * math.pi))
+    
+    def estimate_hyperparameters(self, x: torch.Tensor, y: torch.Tensor, K: int = 1000) -> Tuple[float, float, float]:
+        """
+        Estimate initial hyperparameters for SquaredExponential kernel based on data characteristics.
+        
+        Args:
+            x: Input features tensor of shape (n, d)
+            y: Target values tensor of shape (n,)
+            K: Sample size for estimation (default: 1000)
+        
+        Returns:
+            Tuple containing:
+                - lengthscale: Estimated length scale
+                - variance: Estimated signal variance
+                - noise_var: Estimated noise variance (10% of y variance)
+        """
+        # Get a random sample of x of size K
+        if x.shape[0] > K:
+            random_indices = torch.randperm(x.shape[0])[:K]
+            x_sample = x[random_indices]
+            y_sample = y[random_indices]
+        else:
+            x_sample = x
+            y_sample = y
+        
+        # Calculate pairwise distances between all points in x_sample
+        pairwise_distances = torch.cdist(x_sample, x_sample)
+
+        # Set diagonal elements to infinity to exclude self-distances
+        mask = torch.eye(x_sample.shape[0], device=x_sample.device).bool()
+        pairwise_distances[mask] = float('inf')
+
+        # Calculate the minimum distance for each point
+        min_distances = torch.min(pairwise_distances, dim=1).values
+
+        # Calculate the median of these minimum distances
+        median_distance = torch.median(min_distances)
+
+        # Estimate lengthscale as half the median distance between nearest neighbors
+        lengthscale = 10*median_distance.item()
+
+        # Calculate the variance of y_sample
+        y_var = torch.var(y_sample).item()
+
+        # Estimate signal variance as 90% of y variance
+        signal_var = 0.9 * y_var
+        
+        # Estimate noise variance as 10% of y variance
+        noise_var = 0.1 * y_var
+        
+        return lengthscale, signal_var, noise_var
     
