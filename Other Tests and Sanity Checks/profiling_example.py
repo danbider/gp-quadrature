@@ -7,6 +7,8 @@ import torch
 import numpy as np
 import time
 import matplotlib.pyplot as plt
+import sys 
+sys.path.append('/Users/colecitrenbaum/Documents/GPs/gp-quadrature/')
 from efgpnd import efgpnd_gradient_batched, EFGPND
 from kernels.squared_exponential import SquaredExponential
 
@@ -34,7 +36,7 @@ def direct_gradient_profiling():
     print("="*60)
     
     # Generate synthetic data
-    N =10_000_000  # number of data points
+    N =1_000_000  # number of data points
     d = 2    # dimensionality
     x, y = generate_synthetic_data(N, d, seed=42)
     
@@ -82,7 +84,7 @@ def direct_gradient_profiling():
     start_time = time.time()
     grad_with_profile = efgpnd_gradient_batched(
         x, y, sigmasq, kernel, eps, trace_samples, x0, x1,
-        do_profiling=True, nufft_eps=eps*0.1
+        do_profiling=True, nufft_eps=0.1*eps
     )
     profile_time = time.time() - start_time
     print(f"Gradient with profiling completed in {profile_time:.4f} seconds")
