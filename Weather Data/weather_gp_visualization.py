@@ -21,49 +21,13 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kernels.squared_exponential import SquaredExponential
 from kernels.matern import Matern
+from kernels.kernel_params import GPParams
 from efgpnd import EFGPND
 from efgpnd import efgpnd_gradient_batched
 
 # -----------------------------------------------------------------------------
 # Parameter container that wraps any kernel and a noise variance
 # -----------------------------------------------------------------------------
-class GPParams(nn.Module):
-    def __init__(self, kernel, init_sig2):
-        """
-        kernel: object exposing
-          - iter_hypers() -> yields (name, value)
-          - set_hyper(name, new_value)
-        init_sig2: initial noise variance (float or tensor)
-        """
-        super().__init__()
-        self.kernel = kernel
-        
-        # collect kernel hyper‐names & initial values
-        hypers = list(kernel.iter_hypers())
-        self.hypers_names = [name for name, _ in hypers]
-        init_vals = [float(val) for _, val in hypers]
-        init_vals.append(float(init_sig2))       # add noise variance last
-        
-        # raw = log of all positives, packed into one vector
-        init_raw = torch.log(torch.tensor(init_vals, dtype=torch.get_default_dtype()))
-        self.raw = nn.Parameter(init_raw)        # shape=(D+1,)
-    
-    @property
-    def pos(self):
-        "All positive parameters: kernel‐hypers followed by noise variance"
-        return self.raw.exp()                    # shape=(D+1,)
-    
-    @property
-    def sig2(self):
-        "Noise variance (last entry)"
-        return self.pos[-1]
-    
-    def sync_kernel(self):
-        "Write current positive hypers back into self.kernel"
-        pos_vals = self.pos.detach().cpu().tolist()
-        for i, name in enumerate(self.hypers_names):
-            self.kernel.set_hyper(name, pos_vals[i])
-
 def load_data(filepath):
     """Load the temperature data."""
     print(f"Loading temperature data from {filepath}")
