@@ -91,14 +91,14 @@ def efgpnd_gradient_batched(
             nufft_op = NUFFT(x, xcen, h, nufft_eps, cdtype=cdtype, device=device)
             
             # Define the simplified helper functions
-            fadj = lambda v: nufft_op.type1(v, out_shape=OUT)    # F* apply: nonuniform → uniform
-            fwd = lambda fk: nufft_op.type2(fk)                 # F apply:  uniform → nonuniform
+            fadj = lambda v: nufft_op.type1(v, out_shape=OUT).reshape(-1)    # F* apply: nonuniform → uniform
+            fwd = lambda fk: nufft_op.type2(fk, out_shape=OUT)                # F apply:  uniform → nonuniform
 
         # 2)  Toeplitz operator T (cached FFT) ----------------------------------
         with record_function("3_toeplitz_setup"):
-            m_conv       = (mtot - 1) // 2
-            v_kernel     = compute_convolution_vector_vectorized_dD(m_conv, x, h).to(dtype=cdtype)
-            toeplitz   = ToeplitzND(v_kernel, force_pow2=True)               # cached once
+            m_conv = (mtot - 1) // 2
+            v_kernel = compute_convolution_vector_vectorized_dD(m_conv, x, h).to(dtype=cdtype)
+            toeplitz = ToeplitzND(v_kernel, force_pow2=True)               # cached once
 
             # 3)  Linear map A· = D F*F (D·) + σ² I -------------------------------
             def A_apply(beta):
@@ -648,20 +648,20 @@ class EFGPND(nn.Module):
         # Store h_float as an attribute for later use
         xis.h_float = h_float
         
+        # NUFFT Setup for training points
+        OUT = (mtot,) * d
+        xcen = torch.zeros(d, device=device, dtype=rdtype)
+        
         # Compute spectral density values
         spectral_vals = self.kernel.spectral_density(xis).to(dtype=cdtype)
         ws = torch.sqrt(spectral_vals * (h ** d))
         ws = ws.to(dtype=cdtype)
-    
-        # NUFFT Setup for training points
-        OUT = (mtot,) * d
-        xcen = torch.zeros(d, device=device, dtype=rdtype)
         
         # Setup for training points - use our NUFFT class
         nufft_op = NUFFT(x, xcen, h, nufft_eps, cdtype=cdtype, device=device)
     
         # Compute right-hand side for mean
-        right_hand_side = ws * nufft_op.type1(y, out_shape=OUT)
+        right_hand_side = ws * nufft_op.type1(y, out_shape=OUT).reshape(-1)
     
         # Setup Toeplitz operator
         m_conv = (mtot - 1) // 2
@@ -680,7 +680,7 @@ class EFGPND(nn.Module):
             tol=cg_tol,
             early_stopping=True
         ).solve()
-    
+        
         # Cache results for future predictions
         self._beta = beta
         self._xis = xis
@@ -1241,14 +1241,6 @@ class NUFFT:
     This class provides a unified interface for both Type 1 (nonuniform → uniform)
     and Type 2 (uniform → nonuniform) NUFFT operations, with consistent device
     and dtype handling.
-    
-    Attributes:
-        phi: Phase factors for the points (d, N)
-        device: Device for computations
-        dtype: Real data type
-        cdtype: Complex data type
-        eps: Accuracy parameter for NUFFT
-        d: Dimensionality of the problem
     """
     
     def __init__(self, x, xcen, h, eps, cdtype=None, device=None):
@@ -1273,16 +1265,16 @@ class NUFFT:
         self.phi = (TWO_PI * h * (x - xcen)).T.contiguous().to(device=self.device, dtype=self.dtype)
         self.d = self.phi.shape[0]  # Dimensionality
         
-    def type1(self, vals, out_shape=None):
+    def type1(self, vals, out_shape):
         """
         Type 1 NUFFT: nonuniform → uniform (adjoint).
         
         Args:
             vals: Values at nonuniform points, tensor of shape (N,) or (B, N)
-            out_shape: Output shape tuple, computed if not provided
+            out_shape: Output shape tuple
             
         Returns:
-            Transformed values on uniform grid, flattened to 1D or batched
+            Transformed values on uniform grid
         """
         # Ensure vals is on the correct device and has the right dtype
         vals = vals.to(device=self.device)
@@ -1293,28 +1285,32 @@ class NUFFT:
         if not vals.is_contiguous():
             vals = vals.contiguous()
             
-        # Compute output shape if not provided
-        if out_shape is None:
-            # Default behavior: estimate grid size from number of points
-            n_pts = self.phi.shape[1]
-            m_per_dim = int(n_pts**(1/self.d) + 0.5)  # Round to nearest integer
-            out_shape = (m_per_dim,) * self.d
-            
-        # Run the NUFFT operation
-        result = pff.finufft_type1(
-            self.phi, vals, out_shape,
-            eps=self.eps, isign=-1, modeord=False
-        )
-        
-        # Ensure correct dtype
-        if result.dtype != self.cdtype:
-            result = result.to(dtype=self.cdtype)
-            
-        # Return flattened result if input was 1D
-        if vals.ndim == 1:
-            return result.view(-1)
+        # If input is batched, handle each batch separately
+        if vals.ndim > 1:
+            batch_size = vals.shape[0]
+            results = []
+            for i in range(batch_size):
+                batch_result = pff.finufft_type1(
+                    self.phi, vals[i], out_shape,
+                    eps=self.eps, isign=-1, modeord=False
+                )
+                # Ensure correct dtype
+                if batch_result.dtype != self.cdtype:
+                    batch_result = batch_result.to(dtype=self.cdtype)
+                results.append(batch_result.reshape(-1))
+            return torch.stack(results)
         else:
-            # For batched input, preserve batch dimension
+            # Run the NUFFT operation for non-batched input
+            result = pff.finufft_type1(
+                self.phi, vals, out_shape,
+                eps=self.eps, isign=-1, modeord=False
+            )
+            
+            # Ensure correct dtype
+            if result.dtype != self.cdtype:
+                result = result.to(dtype=self.cdtype)
+                
+            # Return result as is (flattened if needed by caller)
             return result
             
     def type2(self, fk, out_shape=None):
@@ -1322,44 +1318,44 @@ class NUFFT:
         Type 2 NUFFT: uniform → nonuniform (forward).
         
         Args:
-            fk: Values on uniform grid, can be 1D flattened or with batch dimension
-            out_shape: Output shape tuple, computed if not provided
+            fk: Values on uniform grid
+            out_shape: Output shape tuple, required if fk is flattened
             
         Returns:
             Transformed values at nonuniform points
         """
-        # Handle input dimensionality
-        is_batched = fk.ndim > 1
-        
         # Ensure input is on the correct device and has the right dtype
         fk = fk.to(device=self.device)
         if fk.dtype != self.cdtype:
             fk = fk.to(dtype=self.cdtype)
-            
-        # Compute output shape if not provided
-        if out_shape is None:
-            if is_batched:
-                batch_size = fk.shape[0]
-                n_pts = fk.shape[1]
-                m_per_dim = int(n_pts**(1/self.d) + 0.5)
-                out_shape = (batch_size,) + (m_per_dim,) * self.d
-            else:
-                n_pts = fk.shape[0]
-                m_per_dim = int(n_pts**(1/self.d) + 0.5)
-                out_shape = (m_per_dim,) * self.d
         
-        # Reshape for NUFFT
-        if is_batched:
-            # For batched input, need to include batch dimension in reshape
-            fk_nd = fk.reshape(out_shape).contiguous()
+        # For batched input, handle each batch separately
+        if fk.ndim > 1 and fk.shape[0] > 1 and out_shape is not None:
+            batch_size = fk.shape[0]
+            results = []
+            for i in range(batch_size):
+                # Reshape for NUFFT (if needed)
+                batch_fk = fk[i]
+                if batch_fk.ndim == 1:  # Flattened input
+                    batch_fk = batch_fk.reshape(out_shape).contiguous()
+                
+                batch_result = pff.finufft_type2(
+                    self.phi, batch_fk,
+                    eps=self.eps, isign=+1, modeord=False
+                )
+                results.append(batch_result)
+            return torch.stack(results)
         else:
-            fk_nd = fk.reshape(out_shape).contiguous()
-            
-        # Run the NUFFT operation
-        return pff.finufft_type2(
-            self.phi, fk_nd,
-            eps=self.eps, isign=+1, modeord=False
-        )
+            # Reshape for NUFFT (if needed)
+            fk_shaped = fk
+            if fk.ndim == 1 and out_shape is not None:  # Flattened input
+                fk_shaped = fk.reshape(out_shape).contiguous()
+                
+            # Run the NUFFT operation
+            return pff.finufft_type2(
+                self.phi, fk_shaped,
+                eps=self.eps, isign=+1, modeord=False
+            )
 
 def setup_nufft(x, xcen, h, nufft_eps, cdtype):
     """
@@ -1413,7 +1409,7 @@ def setup_operators(ws, toeplitz, sigmasq_scalar, cdtype):
     return A_mean, A_var, Gv
 
 # for stochastic variance estimation
-def diag_sums_nd(A_apply, J, xis_flat, max_cg_iter, cg_tol,ws):
+def diag_sums_nd(A_apply, J, xis_flat, max_cg_iter, cg_tol, ws):
     """
     # computing c[r] where r is a vector offset....
     # TODO write a summary 
@@ -1421,6 +1417,8 @@ def diag_sums_nd(A_apply, J, xis_flat, max_cg_iter, cg_tol,ws):
     N, d_loc = xis_flat.shape
     M_loc = round(N ** (1 / d_loc))
     assert M_loc ** d_loc == N, "xis must lie on tensor grid"
+    
+    # Create Rademacher random vectors
     etas  = (torch.randint(0, 2, (J, N), device=xis_flat.device) * 2 - 1).to(xis_flat.dtype)
     rhs   = ws[None, :] * etas
     us    = BatchConjugateGradients(A_apply, rhs, x0=torch.zeros_like(rhs),
