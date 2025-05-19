@@ -8,133 +8,11 @@ from torch.fft import fftn, ifftn
 from torch import nn
 from torch.optim import Adam
 from torch.profiler import profile, record_function, ProfilerActivity
-# import finufft
 import pytorch_finufft.functional as pff
 from utils.kernels import get_xis
 from cg import ConjugateGradients, BatchConjugateGradients
 import time
 from kernels.kernel_params import GPParams
-
-# Note: Test and gradient validation functions have been moved to utils/gradient_validation.py
-
-# for stochastic variance estimation
-def diag_sums_nd(A_apply, J, xis_flat, max_cg_iter, cg_tol,ws):
-    """
-    # computing c[r] where r is a vector offset....
-    # TODO write a summary 
-    """
-    N, d_loc = xis_flat.shape
-    M_loc = round(N ** (1 / d_loc))
-    assert M_loc ** d_loc == N, "xis must lie on tensor grid"
-    etas  = (torch.randint(0, 2, (J, N), device=xis_flat.device) * 2 - 1).to(xis_flat.dtype)
-    rhs   = ws[None, :] * etas
-    us    = BatchConjugateGradients(A_apply, rhs, x0=torch.zeros_like(rhs),
-                                    tol=cg_tol, max_iter=max_cg_iter, early_stopping=True).solve()
-    gammas = ws[None, :] * us
-    shape = (J,) + (M_loc,) * d_loc
-    gam_nd, eta_nd = gammas.view(shape), etas.view(shape)
-    s_size = (2 * M_loc - 1,) * d_loc
-    G = fftn(gam_nd, s=s_size, dim=tuple(range(1, d_loc + 1)))
-    E = fftn(eta_nd, s=s_size, dim=tuple(range(1, d_loc + 1)))
-    R = ifftn(G * torch.conj(E), s=s_size, dim=tuple(range(1, d_loc + 1)))
-    return R.mean(dim=0)
-
-def nufft_var_est_nd(est_sums, h_val, x_center, pts, eps_val):
-    """
-    Computes the posterior variance given estimated sums of the sums of vector-diagonal offsets 
-    """
-    B_loc, d_loc = pts.shape
-    if est_sums.ndim != d_loc:
-        raise ValueError("est_sums wrong dimensionality")
-    phi = (2 * math.pi * h_val * (pts - x_center[None, :])).T.contiguous()
-    return pff.finufft_type2(phi, est_sums, eps=eps_val, isign=+1, modeord=True).real
-
-
-# ------------------------------------------------------------
-# 1.  fast mat‑vec  Gv = D T D v
-# ------------------------------------------------------------
-# TODO this is redundant with other fcns 
-def make_df_fd_matvec(ws, toeplitz):
-    def Gv(v):
-        return ws * toeplitz(ws * v)
-    return Gv
-
-
-# ------------------------------------------------------------
-# 2.  Hutchinson + Lanczos log‑det approx 
-# ------------------------------------------------------------
-@torch.no_grad()
-def logdet_slq(ws, sigma2, toeplitz,
-               *, probes=1000, steps=100,
-               dtype=torch.float64, device="cpu",
-               eps=1e-18,n=None):
-    """
-    Estimate  log det(I + σ⁻² D T D).
-
-    ws        (m,)            – diagonal weights
-    sigma2    float           – noise variance σ²
-    toeplitz  callable        – fast Toeplitz mat‑vec
-    probes, steps             – Hutchinson & Lanczos params
-    eps                       – floor for Ritz eigen‑values
-    """
-    if n is None:
-        n = y.shape[0]
-    ws  = ws.to(dtype=dtype, device=device)
-    m   = ws.numel()
-    σ2  = torch.as_tensor(sigma2, dtype=dtype, device=device)
-
-    # closures ------------------------------------------------
-    Gv = make_df_fd_matvec(ws, toeplitz)
-    Av = lambda v: v + (1.0 / σ2) * Gv(v)
-
-    logdet_acc = torch.zeros((), dtype=dtype, device=device)
-
-    for _ in range(probes):
-        # ---------- probe ------------------------------
-        z = torch.empty(m, dtype=dtype, device=device).bernoulli_(0.5)
-        z = z.mul_(2).sub_(1)           # ±1  Rademacher
-        q = z / z.norm()                # safer than sqrt(m)
-
-        # ---------- Lanczos ----------------------------
-        alphas, betas = [], []
-        q_prev, beta_prev = torch.zeros_like(q), torch.tensor(
-            0.0, dtype=dtype, device=device
-        )
-
-        for _ in range(steps):
-            v     = Av(q) - beta_prev * q_prev
-            # Ensure both vectors have the same dtype before dot product
-            q_conj = q.conj().to(dtype=v.dtype)
-            alpha = torch.dot(q_conj, v).real
-            v    -= alpha * q
-            beta  = v.norm()
-
-            alphas.append(alpha)
-            betas.append(beta)
-
-            if beta < 1e-12:            # converged early
-                break
-            q_prev, beta_prev = q, beta
-            q = v / beta
-
-        k = len(alphas)
-        T = torch.zeros(k, k, dtype=dtype, device=device)
-        for i in range(k):
-            T[i, i] = alphas[i]
-            if i < k - 1:
-                T[i, i + 1] = betas[i]      # ← correct β indexing
-                T[i + 1, i] = betas[i]
-
-        # ---------- Gauss–Lanczos quadrature ----------
-        evals, evecs = torch.linalg.eigh(T)
-        evals.clamp_min_(eps)               # avoid log(≤0)
-        w1   = evecs[0]
-        quad = (w1**2 * torch.log(evals)).sum() * (z.norm() ** 2)
-        logdet_acc += quad
-    logdet = (logdet_acc / probes).item() + n * math.log(sigma2)
-    return logdet
-
-##### Posterior mean and variance
 
 def efgpnd_gradient_batched(
         x, y, sigmasq, kernel, eps, trace_samples, x0, x1,
@@ -217,6 +95,7 @@ def efgpnd_gradient_batched(
                 if vals.dtype != cdtype:
                     vals = vals.to(cdtype)
                 # if vals not contiguous, make it contiguous
+                #TODO I don't understand how contiguous works. 
                 if not vals.is_contiguous():
                     vals = vals.contiguous()
                 arr = pff.finufft_type1(
@@ -371,9 +250,9 @@ def efgpnd_gradient_batched(
     else:
         return grad.real
 
-# -----------------------------------------------------------------------------
-# Parameter container that wraps any kernel and a noise variance
-# -----------------------------------------------------------------------------
+### Main class for the EFGPND model ###
+# Example usage:
+# model = EFGPND(x, y, "SquaredExponential", EPSILON)
 class EFGPND(nn.Module):
     """
     Equispaced‑Fourier Gaussian Process (EFGP) regression in d dimensions.
@@ -383,8 +262,10 @@ class EFGPND(nn.Module):
     x, y        : training inputs / targets  (stored but *not* copied)
     kernel      : object providing `spectral_density` (passed straight to `efgp_nd`)
                   or a string indicating kernel type (e.g., "SquaredExponential", "SE", "Matern32", "Matern52")
-    sigmasq     : scalar observation noise variance
+    sigmasq     : (optional) scalar observation noise variance
     eps         : quadrature accuracy parameter (passed to `get_xis`)
+    nufft_eps   : NUFFT accuracy parameter
+    # TODO some of these opts are getting clunky, maybe see Gpytorch for inspiration
     opts        : dict with CG tolerances, variance method, and other options:
                   - estimate_variance: bool - whether to compute predictive variances
                   - variance_method: str - 'regular' or 'stochastic'
@@ -422,8 +303,6 @@ class EFGPND(nn.Module):
         estimate_params : whether to initialize lengthscales and noise by MLE
         """
         super().__init__()
-        
-        # Store data
         self.x = x
         self.y = y
         self.device = x.device
@@ -456,7 +335,8 @@ class EFGPND(nn.Module):
         
         self.kernel = kernel
         
-        # Estimate optimal hyperparameters if requested
+        # Estimate optimal hyperparameters if passed a string
+        # TODO this doesn't need to be great but probably need to see how this works on different datasets.
         if estimate_params:
             try:
                 # Compute pairwise distances to estimate lengthscale
@@ -520,8 +400,6 @@ class EFGPND(nn.Module):
 
     def register_optimizer(self, optimizer):
         """
-        Register an optimizer to automatically sync parameters after each step.
-        
         This method adds hooks to the optimizer's step function to automatically
         call sync_parameters() after each optimization step.
         
@@ -639,6 +517,8 @@ class EFGPND(nn.Module):
             
         return False
 
+# TODO there's some redundancy here-- this is calling a fcn to get gradients
+# then converts to raw space and applies them to the parameters. 
     def compute_gradients(
         self,
         *,
@@ -728,14 +608,14 @@ class EFGPND(nn.Module):
             grads = grads.unsqueeze(0)  # Convert scalar to 1D tensor
         
         
-        # Transform to raw space gradient via chain rule: ∂L/∂raw_i = (∂L/∂param_i) * param_i
+        # Transform to raw space gradient via chain rule
         pos_vec = self._gp_params.pos.to(self.device)
         raw_grad = torch.stack([
             grads[i].detach().to(self.device) * pos_vec[i]
             for i in range(len(grads))
         ], dim=0)
         
-        # Automatically apply gradients if requested
+        # Automatically apply gradients 
         if apply_gradients:
             # Make sure raw_grad is detached before setting as gradient
             with torch.no_grad():
@@ -831,7 +711,7 @@ class EFGPND(nn.Module):
         toeplitz = ToeplitzND(v_kernel, force_pow2=True)
         
         # Create operator functions
-        A_mean, A_var = setup_operators(ws, toeplitz, sigmasq_scalar, cdtype)
+        A_mean, A_var, Gv = setup_operators(ws, toeplitz, sigmasq_scalar, cdtype)
     
         # Solve CG system for mean
         cg_tol = self.opts.get("cg_tolerance", 1e-4)
@@ -938,7 +818,7 @@ class EFGPND(nn.Module):
             mtot = int(xis.shape[0]**(1/d))
             
             # Create operator functions
-            A_mean, A_var = setup_operators(ws, toeplitz, sigmasq_scalar, cdtype)
+            A_mean, A_var, Gv = setup_operators(ws, toeplitz, sigmasq_scalar, cdtype)
         
             # Setup for prediction
             xcen = torch.zeros(d, device=device, dtype=rdtype)
@@ -1213,7 +1093,7 @@ def _cmplx(real_dtype: torch.dtype) -> torch.dtype:
     """Matching complex dtype for a given real dtype."""
     return torch.complex64 if real_dtype == torch.float32 else torch.complex128
 
-
+# TODO - work out when to do the force_pow2 etc 
 class ToeplitzND:
     """
     ToeplitzND class for multidimensional Toeplitz matrix-vector products using FFTs.
@@ -1459,6 +1339,10 @@ def setup_operators(ws, toeplitz, sigmasq_scalar, cdtype):
     ns_shape = tuple(toeplitz.ns)
     ws_block = ws.view(1, *ns_shape)
     
+    # Create the basic weighted Toeplitz function
+    def Gv(v):
+        return ws * toeplitz(ws * v)
+    
     def A_mean(beta):
         beta = beta.to(dtype=cdtype)
         wbeta = ws * beta
@@ -1474,7 +1358,116 @@ def setup_operators(ws, toeplitz, sigmasq_scalar, cdtype):
         out_block = ws_block * Tg / sigmasq_scalar + g_block
         return out_block.view(gamma.shape)
     
-    return A_mean, A_var
+    return A_mean, A_var, Gv
+
+# for stochastic variance estimation
+def diag_sums_nd(A_apply, J, xis_flat, max_cg_iter, cg_tol,ws):
+    """
+    # computing c[r] where r is a vector offset....
+    # TODO write a summary 
+    """
+    N, d_loc = xis_flat.shape
+    M_loc = round(N ** (1 / d_loc))
+    assert M_loc ** d_loc == N, "xis must lie on tensor grid"
+    etas  = (torch.randint(0, 2, (J, N), device=xis_flat.device) * 2 - 1).to(xis_flat.dtype)
+    rhs   = ws[None, :] * etas
+    us    = BatchConjugateGradients(A_apply, rhs, x0=torch.zeros_like(rhs),
+                                    tol=cg_tol, max_iter=max_cg_iter, early_stopping=True).solve()
+    gammas = ws[None, :] * us
+    shape = (J,) + (M_loc,) * d_loc
+    gam_nd, eta_nd = gammas.view(shape), etas.view(shape)
+    s_size = (2 * M_loc - 1,) * d_loc
+    G = fftn(gam_nd, s=s_size, dim=tuple(range(1, d_loc + 1)))
+    E = fftn(eta_nd, s=s_size, dim=tuple(range(1, d_loc + 1)))
+    R = ifftn(G * torch.conj(E), s=s_size, dim=tuple(range(1, d_loc + 1)))
+    return R.mean(dim=0)
+
+def nufft_var_est_nd(est_sums, h_val, x_center, pts, eps_val):
+    """
+    Computes the posterior variance given estimated sums of the sums of vector-diagonal offsets 
+    """
+    B_loc, d_loc = pts.shape
+    if est_sums.ndim != d_loc:
+        raise ValueError("est_sums wrong dimensionality")
+    phi = (2 * math.pi * h_val * (pts - x_center[None, :])).T.contiguous()
+    return pff.finufft_type2(phi, est_sums, eps=eps_val, isign=+1, modeord=True).real
+
+
+# ------------------------------------------------------------
+# 2.  Hutchinson + Lanczos log‑det approx. 
+# Only used for computing log marginal likelihood, which we don't use for gradients, but if you want to check periodically while learning.
+# ------------------------------------------------------------
+@torch.no_grad()
+def logdet_slq(ws, sigma2, toeplitz,
+               *, probes=1000, steps=100,
+               dtype=torch.float64, device="cpu",
+               eps=1e-18,n=None):
+    """
+    Estimate  log det(I + σ⁻² D T D).
+
+    ws        (m,)            – diagonal weights
+    sigma2    float           – noise variance σ²
+    toeplitz  callable        – fast Toeplitz mat‑vec
+    probes, steps             – Hutchinson & Lanczos params
+    eps                       – floor for Ritz eigen‑values
+    """
+    if n is None:
+        n = y.shape[0]
+    ws  = ws.to(dtype=dtype, device=device)
+    m   = ws.numel()
+    σ2  = torch.as_tensor(sigma2, dtype=dtype, device=device)
+
+    # Get the Gv function directly from setup_operators
+    cdtype = _cmplx(dtype)
+    _, _, Gv = setup_operators(ws, toeplitz, sigma2, cdtype)
+    Av = lambda v: v + (1.0 / σ2) * Gv(v)
+
+    logdet_acc = torch.zeros((), dtype=dtype, device=device)
+
+    for _ in range(probes):
+        # ---------- probe ------------------------------
+        z = torch.empty(m, dtype=dtype, device=device).bernoulli_(0.5)
+        z = z.mul_(2).sub_(1)           # ±1  Rademacher
+        q = z / z.norm()                # safer than sqrt(m)
+
+        # ---------- Lanczos ----------------------------
+        alphas, betas = [], []
+        q_prev, beta_prev = torch.zeros_like(q), torch.tensor(
+            0.0, dtype=dtype, device=device
+        )
+
+        for _ in range(steps):
+            v     = Av(q) - beta_prev * q_prev
+            # Ensure both vectors have the same dtype before dot product
+            q_conj = q.conj().to(dtype=v.dtype)
+            alpha = torch.dot(q_conj, v).real
+            v    -= alpha * q
+            beta  = v.norm()
+
+            alphas.append(alpha)
+            betas.append(beta)
+
+            if beta < 1e-12:            # converged early
+                break
+            q_prev, beta_prev = q, beta
+            q = v / beta
+
+        k = len(alphas)
+        T = torch.zeros(k, k, dtype=dtype, device=device)
+        for i in range(k):
+            T[i, i] = alphas[i]
+            if i < k - 1:
+                T[i, i + 1] = betas[i]      # ← correct β indexing
+                T[i + 1, i] = betas[i]
+
+        # ---------- Gauss–Lanczos quadrature ----------
+        evals, evecs = torch.linalg.eigh(T)
+        evals.clamp_min_(eps)               # avoid log(≤0)
+        w1   = evecs[0]
+        quad = (w1**2 * torch.log(evals)).sum() * (z.norm() ** 2)
+        logdet_acc += quad
+    logdet = (logdet_acc / probes).item() + n * math.log(sigma2)
+    return logdet
 
 def compute_prediction_variance(x_new, xis, ws, A_var, cg_tol, max_cg_iter, variance_method, h, xcen, hutchinson_probes, nufft_eps, device, rdtype, cdtype):
     """
