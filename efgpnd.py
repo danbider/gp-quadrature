@@ -380,11 +380,18 @@ class EFGPND(nn.Module):
                 if sigmasq is None:
                     sigmasq = 0.1
         
-        # Create GP parameters
-        self._gp_params = GPParams(kernel=kernel, init_sig2=(sigmasq or 0.1))
-        
-        # Register parameters
-        self.register_parameter("gp_params", self._gp_params.raw)
+        # Set default dtype to match the input data's dtype
+        prev_default_dtype = torch.get_default_dtype()
+        try:
+            # Temporarily set default dtype to match input data
+            torch.set_default_dtype(x.dtype)
+            # Create GP parameters - these will now use the input data's dtype
+            self._gp_params = GPParams(kernel=kernel, init_sig2=(sigmasq or 0.1))
+            # Register parameters
+            self.register_parameter("gp_params", self._gp_params.raw)
+        finally:
+            # Restore the previous default dtype
+            torch.set_default_dtype(prev_default_dtype)
         
         # Store fit data
         self._beta = None        # Fourier weights
@@ -517,8 +524,6 @@ class EFGPND(nn.Module):
             
         return False
 
-# TODO there's some redundancy here-- this is calling a fcn to get gradients
-# then converts to raw space and applies them to the parameters. 
     def compute_gradients(
         self,
         *,
@@ -602,16 +607,19 @@ class EFGPND(nn.Module):
             grads, log_marginal = result
         else:
             grads = result
+        
+        # Ensure grads is a tensor with the correct dtype to match model parameters
         if not isinstance(grads, torch.Tensor):
             grads = torch.tensor(grads, device=self.device, dtype=self.x.dtype)
         if grads.ndim == 0:
             grads = grads.unsqueeze(0)  # Convert scalar to 1D tensor
         
-        
         # Transform to raw space gradient via chain rule
-        pos_vec = self._gp_params.pos.to(self.device)
+        pos_vec = self._gp_params.pos.to(device=self.device)
+        # Make sure the gradient has the same dtype as the model parameters
+        param_dtype = self._gp_params.raw.dtype
         raw_grad = torch.stack([
-            grads[i].detach().to(self.device) * pos_vec[i]
+            grads[i].detach().to(device=self.device, dtype=param_dtype) * pos_vec[i]
             for i in range(len(grads))
         ], dim=0)
         
@@ -654,7 +662,7 @@ class EFGPND(nn.Module):
             
         # Setup common constants and parameters
         device = self.x.device
-        rdtype = torch.float32
+        rdtype = self.x.dtype  # Use input data's dtype instead of hardcoding
         cdtype = _cmplx(rdtype)
         sigmasq_scalar = float(self._gp_params.sig2)
         
@@ -786,7 +794,7 @@ class EFGPND(nn.Module):
         
         # Setup common constants and parameters
         device = self.x.device
-        rdtype = torch.float32
+        rdtype = self.x.dtype  # Use input data's dtype
         cdtype = _cmplx(rdtype)
         sigmasq_scalar = float(self._gp_params.sig2)
         
@@ -914,7 +922,7 @@ class EFGPND(nn.Module):
             toeplitz=toeplitz,
             probes=self.opts.get("log_marginal_probes", 100),
             steps=self.opts.get("log_marginal_steps", 25),
-            dtype=rdtype,
+            dtype=rdtype,  # Pass the data type explicitly
             device=device,
             n=n
         )
@@ -1401,7 +1409,7 @@ def nufft_var_est_nd(est_sums, h_val, x_center, pts, eps_val):
 def logdet_slq(ws, sigma2, toeplitz,
                *, probes=1000, steps=100,
                dtype=torch.float64, device="cpu",
-               eps=1e-18,n=None):
+               eps=1e-18, n=None):
     """
     Estimate  log det(I + σ⁻² D T D).
 
@@ -1413,9 +1421,11 @@ def logdet_slq(ws, sigma2, toeplitz,
     """
     if n is None:
         n = y.shape[0]
-    ws  = ws.to(dtype=dtype, device=device)
-    m   = ws.numel()
-    σ2  = torch.as_tensor(sigma2, dtype=dtype, device=device)
+        
+    # Convert inputs to specified dtype (either float32 or float64)
+    ws = ws.to(dtype=dtype, device=device)
+    m = ws.numel()
+    σ2 = torch.as_tensor(sigma2, dtype=dtype, device=device)
 
     # Get the Gv function directly from setup_operators
     cdtype = _cmplx(dtype)
@@ -1437,12 +1447,12 @@ def logdet_slq(ws, sigma2, toeplitz,
         )
 
         for _ in range(steps):
-            v     = Av(q) - beta_prev * q_prev
+            v = Av(q) - beta_prev * q_prev
             # Ensure both vectors have the same dtype before dot product
             q_conj = q.conj().to(dtype=v.dtype)
             alpha = torch.dot(q_conj, v).real
-            v    -= alpha * q
-            beta  = v.norm()
+            v -= alpha * q
+            beta = v.norm()
 
             alphas.append(alpha)
             betas.append(beta)
@@ -1463,9 +1473,10 @@ def logdet_slq(ws, sigma2, toeplitz,
         # ---------- Gauss–Lanczos quadrature ----------
         evals, evecs = torch.linalg.eigh(T)
         evals.clamp_min_(eps)               # avoid log(≤0)
-        w1   = evecs[0]
+        w1 = evecs[0]
         quad = (w1**2 * torch.log(evals)).sum() * (z.norm() ** 2)
         logdet_acc += quad
+        
     logdet = (logdet_acc / probes).item() + n * math.log(sigma2)
     return logdet
 
@@ -1515,7 +1526,8 @@ def compute_prediction_variance(x_new, xis, ws, A_var, cg_tol, max_cg_iter, vari
 
     if variance_method.lower() == 'regular':
         # Exact CG with microbatching for large x_new
-        microbatch = 8192  # Adjust as needed for hardware
+        # TODO - work out the batching .. don't know what I'm doing with this I, but I run out of memory otherwise.
+        microbatch = 8192  
         out = []
         for xb in torch.split(x_new, microbatch, dim=0):  # (b, d)
             fx = torch.exp(TWO_PI * 1j * (xb @ xis.T)).to(cdtype)  # (b, m)
