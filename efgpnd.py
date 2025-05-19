@@ -10,7 +10,7 @@ from torch.optim import Adam
 from torch.profiler import profile, record_function, ProfilerActivity
 import pytorch_finufft.functional as pff
 from utils.kernels import get_xis
-from cg import ConjugateGradients, BatchConjugateGradients
+from cg import ConjugateGradients
 import time
 from kernels.kernel_params import GPParams
 
@@ -101,17 +101,18 @@ def efgpnd_gradient_batched(
             toeplitz = ToeplitzND(v_kernel, force_pow2=True)               # cached once
 
             # 3)  Linear map A· = D F*F (D·) + σ² I -------------------------------
-            def A_apply(beta):
-                return ws * toeplitz(ws * beta) + sigmasq * beta
+            A_apply = create_A_mean(ws, toeplitz, sigmasq, cdtype)
 
         # 4)  Solve A β = W F* y ---------------------------------------------
         with record_function("4_solve_cg"):
             Fy = fadj(y).reshape(-1)
 
             rhs   = ws * Fy
-            beta  = ConjugateGradients(A_apply, rhs,
-                                    torch.zeros_like(rhs),
-                                    tol=cg_tol, early_stopping=early_stopping).solve()
+            beta = ConjugateGradients(
+                A_apply, rhs,
+                torch.zeros_like(rhs),
+                tol=cg_tol, early_stopping=early_stopping
+            ).solve()
             alpha = (y - fwd(ws * beta)) / sigmasq # (\tilde{K} +sigma^2 I)^{-1} y
 
         # 5)  Term‑2  (α*D'α, α*α) --------------------------------------------
@@ -159,14 +160,15 @@ def efgpnd_gradient_batched(
             B_all = torch.cat((B_all_kernel,  B_noise.unsqueeze(0)), dim=0) \
                         .reshape(num_hypers * T, -1)        # (num_hypers*T, M)
 
-            def A_apply_batch(B):
-                return ws * toeplitz(ws * B) + sigmasq * B
-            # A_apply_batch_compiled = torch.compile(A_apply_batch)
+            # Create a reusable A_apply_batch function instead of defining inline
+            A_apply_batch = lambda B: create_A_mean(ws, toeplitz, sigmasq, cdtype)(B)
+            
         with record_function("7_batch_cg_solve"):
-
-            Beta_all = BatchConjugateGradients(
+            Beta_all = ConjugateGradients(
                 A_apply_batch, B_all, torch.zeros_like(B_all),
-                tol=cg_tol, early_stopping=early_stopping).solve()
+                tol=cg_tol, early_stopping=early_stopping
+            ).solve()
+                
         with record_function("7.5_compute_alpha"):
             #
             Alpha_all = (R_all - fwd(ws * Beta_all)) / sigmasq
@@ -186,7 +188,8 @@ def efgpnd_gradient_batched(
                         probes=log_marginal_probes,
                         steps=log_marginal_steps,
                         dtype=rdtype, device=device, n=N)
-                log_marginal = (-0.5 * torch.vdot(y.to(cdtype), alpha) - 0.5*det_term -0.5*N*math.log(2*math.pi)).to(dtype=rdtype)
+                vdot_term = torch.vdot(y.to(cdtype), alpha).real
+                log_marginal = (-0.5 * vdot_term - 0.5*det_term -0.5*N*math.log(2*math.pi)).to(dtype=rdtype)
 
 
 
@@ -668,8 +671,8 @@ class EFGPND(nn.Module):
         v_kernel = compute_convolution_vector_vectorized_dD(m_conv, x, h).to(dtype=cdtype)
         toeplitz = ToeplitzND(v_kernel, force_pow2=True)
         
-        # Create operator functions
-        A_mean, A_var, Gv = setup_operators(ws, toeplitz, sigmasq_scalar, cdtype)
+        # Create A_mean operator directly using the new function
+        A_mean = create_A_mean(ws, toeplitz, sigmasq_scalar, cdtype)
     
         # Solve CG system for mean
         cg_tol = self.opts.get("cg_tolerance", 1e-4)
@@ -775,8 +778,8 @@ class EFGPND(nn.Module):
             h = torch.tensor(h_float, device=device, dtype=rdtype)
             mtot = int(xis.shape[0]**(1/d))
             
-            # Create operator functions
-            A_mean, A_var, Gv = setup_operators(ws, toeplitz, sigmasq_scalar, cdtype)
+            # Create operator functions using the new approach
+            A_var = create_A_var(ws, toeplitz, sigmasq_scalar, cdtype)
         
             # Setup for prediction
             xcen = torch.zeros(d, device=device, dtype=rdtype)
@@ -1376,14 +1379,11 @@ def setup_nufft(x, xcen, h, nufft_eps, cdtype):
     
     return nufft_op.phi, finufft1, finufft2
 
-def setup_operators(ws, toeplitz, sigmasq_scalar, cdtype):
-    """Helper function to set up operator functions."""
+def create_Gv(ws, toeplitz, cdtype):
+    """Create just the Gv operator function."""
     ns_shape = tuple(toeplitz.ns)
     ws_block = ws.view(1, *ns_shape)
     
-    # Core weighted Toeplitz function that handles both batched and non-batched inputs
-
-    # D F^*F D operation 
     def Gv(v):
         v = v.to(dtype=cdtype)
         is_batch = v.ndim > 1
@@ -1397,32 +1397,59 @@ def setup_operators(ws, toeplitz, sigmasq_scalar, cdtype):
             Tv = toeplitz(ws_block * v_block)
             result = ws_block * Tv
             return result.view(v.shape)
+            
+    return Gv
+
+def create_A_mean(ws, toeplitz, sigmasq_scalar, cdtype):
+    """Create just the A_mean operator function."""
+    Gv = create_Gv(ws, toeplitz, cdtype)
     
-    # D F^*F D + sigma^2 I 
     def A_mean(beta):
         return Gv(beta) + sigmasq_scalar * beta
+        
+    return A_mean
 
-    # D F^*F D/sigma^2 + I 
+def create_A_var(ws, toeplitz, sigmasq_scalar, cdtype):
+    """Create just the A_var operator function."""
+    Gv = create_Gv(ws, toeplitz, cdtype)
+    
     def A_var(gamma):
         return Gv(gamma) / sigmasq_scalar + gamma
+        
+    return A_var
+
+def setup_operators(ws, toeplitz, sigmasq_scalar, cdtype):
+    """Helper function to set up all operator functions (kept for backward compatibility)."""
+    Gv = create_Gv(ws, toeplitz, cdtype)
+    A_mean = create_A_mean(ws, toeplitz, sigmasq_scalar, cdtype)
+    A_var = create_A_var(ws, toeplitz, sigmasq_scalar, cdtype)
     
     return A_mean, A_var, Gv
 
 # for stochastic variance estimation
 def diag_sums_nd(A_apply, J, xis_flat, max_cg_iter, cg_tol, ws):
     """
-    # computing c[r] where r is a vector offset....
-    # TODO write a summary 
+    Computing c[r] where r is a vector offset for stochastic variance estimation.
+    Uses Hutchinson's method with randomized probing.
     """
     N, d_loc = xis_flat.shape
     M_loc = round(N ** (1 / d_loc))
     assert M_loc ** d_loc == N, "xis must lie on tensor grid"
     
     # Create Rademacher random vectors
-    etas  = (torch.randint(0, 2, (J, N), device=xis_flat.device) * 2 - 1).to(xis_flat.dtype)
-    rhs   = ws[None, :] * etas
-    us    = BatchConjugateGradients(A_apply, rhs, x0=torch.zeros_like(rhs),
-                                    tol=cg_tol, max_iter=max_cg_iter, early_stopping=True).solve()
+    etas = (torch.randint(0, 2, (J, N), device=xis_flat.device) * 2 - 1).to(xis_flat.dtype)
+    rhs = ws[None, :] * etas
+    
+    # Use BatchConjugateGradients to solve the system
+    us = ConjugateGradients(
+        A_apply, 
+        rhs, 
+        x0=torch.zeros_like(rhs),
+        tol=cg_tol, 
+        max_iter=max_cg_iter, 
+        early_stopping=True
+    ).solve()
+    
     gammas = ws[None, :] * us
     shape = (J,) + (M_loc,) * d_loc
     gam_nd, eta_nd = gammas.view(shape), etas.view(shape)
@@ -1470,13 +1497,13 @@ def logdet_slq(ws, sigma2, toeplitz,
         n = y.shape[0]
         
     # Convert inputs to specified dtype (either float32 or float64)
-    ws = ws.to(dtype=dtype, device=device)
+    ws = ws.real.to(dtype=dtype, device=device)
     m = ws.numel()
     σ2 = torch.as_tensor(sigma2, dtype=dtype, device=device)
 
-    # Get the Gv function directly from setup_operators
+    # Get the Gv function directly using create_Gv
     cdtype = _cmplx(dtype)
-    _, _, Gv = setup_operators(ws, toeplitz, sigma2, cdtype)
+    Gv = create_Gv(ws, toeplitz, cdtype)
     Av = lambda v: v + (1.0 / σ2) * Gv(v)
 
     logdet_acc = torch.zeros((), dtype=dtype, device=device)
@@ -1579,7 +1606,7 @@ def compute_prediction_variance(x_new, xis, ws, A_var, cg_tol, max_cg_iter, vari
             # Use direct matrix multiplication instead of NUFFT for this method
             fx = torch.exp(TWO_PI * 1j * (xb @ xis.T)).to(cdtype)  # (b, m)
             rhs = ws * fx.conj()  # (b, m)
-            gamma = BatchConjugateGradients(
+            gamma = ConjugateGradients(
                 A_var, rhs, x0=torch.zeros_like(rhs, dtype=cdtype),
                 tol=cg_tol, max_iter=max_cg_iter, early_stopping=True
             ).solve()  # (b, m)
