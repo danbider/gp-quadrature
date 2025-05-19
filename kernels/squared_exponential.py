@@ -23,7 +23,9 @@ class SquaredExponential(Kernel):
         Returns:
             kernel, tensor of shape (n,)
         """
-        return self.variance * torch.exp(-0.5 * (distance/self.lengthscale)**2)
+        ls = self.get_hyper('lengthscale')
+        var = self.get_hyper('variance')
+        return var * torch.exp(-0.5 * (distance/ls)**2)
 
     def spectral_density(self, xid: torch.Tensor) -> torch.Tensor:
         """
@@ -36,7 +38,9 @@ class SquaredExponential(Kernel):
         # Ensure xid is 2D
         if xid.ndim == 1:
             xid = xid.unsqueeze(-1)
-        return self.variance * (2*math.pi*self.lengthscale**2)**(self.dimension/2) * torch.exp(-2*math.pi**2*self.lengthscale**2 * torch.sum(xid**2, dim=-1))
+        ls = self.get_hyper('lengthscale')
+        var = self.get_hyper('variance')
+        return var * (2*math.pi*ls**2)**(self.dimension/2) * torch.exp(-2*math.pi**2*ls**2 * torch.sum(xid**2, dim=-1))
 
     def spectral_grad(self, xid: torch.Tensor) -> torch.Tensor:
         """
@@ -60,15 +64,18 @@ class SquaredExponential(Kernel):
         # Compute the spectral density S(xid)
         S = self.spectral_density(xid)
         
+        ls = self.get_hyper('lengthscale')
+        var = self.get_hyper('variance')
+        
         # Gradient with respect to variance: ∂S/∂variance = S / variance
-        dS_dvariance = S / self.variance
+        dS_dvariance = S / var
         
         # Compute sum of squared frequencies across dimensions
         xid_squared_sum = torch.sum(xid**2, dim=-1)
         
         # Gradient with respect to lengthscale:
         # ∂S/∂lengthscale = S * (dimension/lengthscale - 4π² * lengthscale * Σxid_i²)
-        dS_dlengthscale = S * ((self.dimension / self.lengthscale) - 4 * math.pi**2 * self.lengthscale * xid_squared_sum)
+        dS_dlengthscale = S * ((self.dimension / ls) - 4 * math.pi**2 * ls * xid_squared_sum)
         
         # Stack the gradients so that the last dimension contains [dS/dlengthscale, dS/dvariance]
         grad = torch.stack([dS_dlengthscale, dS_dvariance], dim=-1) # in the same order as hypers 

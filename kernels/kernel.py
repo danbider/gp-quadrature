@@ -1,6 +1,6 @@
 import math
 import torch
-from typing import List, Iterator, Tuple
+from typing import List, Iterator, Tuple, Optional
 from pydantic import BaseModel, Field
 
 class Kernel(BaseModel):
@@ -20,6 +20,7 @@ class Kernel(BaseModel):
     variance: float = Field(1.0, gt=0)  # variance, positive float
     hypers: List[str] = Field(default_factory=lambda: ['lengthscale', 'variance'], frozen=True)
     num_hypers: int = Field(3, frozen=True)  # number of hyperparameters (including noise variance)
+    _gp_params_ref: Optional[object] = None  # Reference to GPParams for direct parameter access
     
     class ConfigDict:
         arbitrary_types_allowed = True
@@ -95,24 +96,41 @@ class Kernel(BaseModel):
     def get_hyper(self, name: str) -> float:
         """
         Get hyperparameter value by name.
+        If this kernel has a GPParams reference, return the value from there,
+        otherwise get the value directly from this kernel instance.
         """
-        return getattr(self, name)
+        if self._gp_params_ref is not None and name in self._gp_params_ref.hypers_names:
+            idx = self._gp_params_ref.hypers_names.index(name)
+            return float(self._gp_params_ref.pos[idx].item())
+        else:
+            return getattr(self, name)
     
     def set_hyper(self, name: str, value: float) -> None:
         """
         Set hyperparameter value by name.
+        This is used during initialization and is still needed for cases 
+        where parameters are set directly outside the optimization process.
         """
         setattr(self, name, value)
     
     def iter_hypers(self) -> Iterator[Tuple[str, float]]:
         """
         Iterate through hyperparameters and their values.
+        If this kernel has a GPParams reference, get values from there,
+        otherwise get values directly from this kernel instance.
         
         Returns:
             Iterator of (name, value) tuples
         """
-        for name in self.hypers:
-            yield name, getattr(self, name)
+        if self._gp_params_ref is not None:
+            for i, name in enumerate(self.hypers):
+                if i < len(self._gp_params_ref.hypers_names):
+                    yield name, float(self._gp_params_ref.pos[i].item())
+                else:
+                    yield name, getattr(self, name)
+        else:
+            for name in self.hypers:
+                yield name, getattr(self, name)
     
     def model_copy(self) -> 'Kernel':
         """

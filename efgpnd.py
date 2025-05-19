@@ -84,49 +84,15 @@ def efgpnd_gradient_batched(
         with record_function("2_nufft_setup"):
             OUT = (mtot,)*d
             
-            # nufft_eps = 1e-4
-            phi = (2 * math.pi * h * (x - 0.0)).to(dtype).T.contiguous()   # real (N,)
-            def finufft1(vals):
-                """
-                Adjoint NUFFT: nonuniform→uniform.
-                vals: (N,) complex
-                returns: tensor of shape OUT, then flattened
-                """
-                if vals.dtype != cdtype:
-                    vals = vals.to(cdtype)
-                # if vals not contiguous, make it contiguous
-                #TODO I don't understand how contiguous works. 
-                if not vals.is_contiguous():
-                    vals = vals.contiguous()
-                arr = pff.finufft_type1(
-                    phi, vals, OUT,
-                    eps=nufft_eps, isign=-1, modeord=False
-                )
-                return arr  # (mtot**d,)
-
-            def finufft2(fk_flat):
-                """
-                Forward NUFFT: uniform→nonuniform.
-                fk_flat: (mtot**d,) complex, in CMCL order
-                returns: tensor of shape (N,)
-                """
-
-                if fk_flat.ndim == 1:
-                    fk_nd = fk_flat.reshape(OUT)
-                else:
-                    OUT_trace = (fk_flat.shape[0],) + OUT
-                    fk_nd = fk_flat.reshape(OUT_trace).contiguous() # (T, mtot**d)
-                    if fk_nd.dtype != cdtype:
-                        fk_nd = fk_nd.to(cdtype)
-                # fk_nd = fk_flat
-                return pff.finufft_type2(
-                    phi, fk_nd, # phi is (d,N), fk_nd is (T, mtot**d)
-                    eps=nufft_eps, isign=+1, modeord=False
-                )
-
-
-            fadj = lambda v: finufft1(v)    # NU → U
-            fwd  = lambda fk: finufft2(fk)  # U  → NU
+            # Create a center point at origin
+            xcen = torch.zeros(d, device=device, dtype=dtype)
+            
+            # Create the NUFFT operator
+            nufft_op = NUFFT(x, xcen, h, nufft_eps, cdtype=cdtype, device=device)
+            
+            # Define the simplified helper functions
+            fadj = lambda v: nufft_op.type1(v, out_shape=OUT)    # F* apply: nonuniform → uniform
+            fwd = lambda fk: nufft_op.type2(fk)                 # F apply:  uniform → nonuniform
 
         # 2)  Toeplitz operator T (cached FFT) ----------------------------------
         with record_function("3_toeplitz_setup"):
@@ -389,6 +355,9 @@ class EFGPND(nn.Module):
             self._gp_params = GPParams(kernel=kernel, init_sig2=(sigmasq or 0.1))
             # Register parameters
             self.register_parameter("gp_params", self._gp_params.raw)
+            # Ensure the kernel has a reference to GPParams (this is also done in GPParams.__init__)
+            if hasattr(self.kernel, '_gp_params_ref') and self.kernel._gp_params_ref is None:
+                self.kernel._gp_params_ref = self._gp_params
         finally:
             # Restore the previous default dtype
             torch.set_default_dtype(prev_default_dtype)
@@ -408,7 +377,7 @@ class EFGPND(nn.Module):
     def register_optimizer(self, optimizer):
         """
         This method adds hooks to the optimizer's step function to automatically
-        call sync_parameters() after each optimization step.
+        update the parameter cache after each optimization step.
         
         Parameters
         ----------
@@ -427,14 +396,13 @@ class EFGPND(nn.Module):
         # Store original step function
         original_step = optimizer.step
         
-        # Create a new step function that calls sync_parameters after the original step
+        # updates the parameter cache after the original step
         def step_with_sync(*args, **kwargs):
             # Call the original step function
             result = original_step(*args, **kwargs)
             
-            # Ensure parameters are properly synchronized
-            self._gp_params.sync_all_parameters()
-            self.sync_parameters()
+            # Syncs parameters with the kernel
+            self._update_param_cache() 
             
             return result
             
@@ -451,31 +419,11 @@ class EFGPND(nn.Module):
         """Get the current noise variance tensor from GPParams"""
         return self._gp_params.sig2
     
-    def sync_parameters(self):
-        """
-        Synchronize parameters between GPParams, kernel, and sigmasq.
-        Call this after manual parameter updates to ensure consistency.
-        """
-        # Get the current parameter values from GPParams
-        pos_vals = self._gp_params.pos.detach().cpu().tolist()
-        
-        # Update kernel hyperparameters directly
-        for i, name in enumerate(self._gp_params.hypers_names):
-            self.kernel.set_hyper(name, pos_vals[i])
-        
-        # Store the current noise variance
-        self._internal_sigmasq = self._gp_params.sig2.detach().clone()
-        
-        # Update parameter cache
-        self._update_param_cache()
-        
-        return self
-    
-
     def _update_param_cache(self):
         """
         Store current hyperparameter values in the cache to detect changes. 
         Used so that predict can check if hyperparameters have changed and refit if so.
+        Call this method after manually updating parameters to ensure cache consistency.
         """
         if isinstance(self.kernel, str):
             # In case kernel is a string
@@ -487,7 +435,9 @@ class EFGPND(nn.Module):
                 self._cached_params[name] = float(value)
             # Store noise variance
             self._cached_params['sigmasq'] = float(self.sigmasq.item())
-    
+            
+        return self # Enable method chaining for backward compatibility
+
     def _params_changed(self):
         """
         Check if hyperparameters have changed since the last fit.
@@ -571,8 +521,8 @@ class EFGPND(nn.Module):
             (grads, log_marginal) : Tuple[torch.Tensor, torch.Tensor]
                 Gradients and log marginal likelihood value
         """
-        # Ensure parameters are synchronized from GPParams to kernel
-        self.sync_parameters()
+        # Ensure cache is updated
+        self._update_param_cache()
         
         # Set default nufft_eps if not provided
         if nufft_eps is None:
@@ -647,8 +597,8 @@ class EFGPND(nn.Module):
         nufft_eps : float, optional
             NUFFT accuracy parameter, defaults to self.nufft_eps if not specified
         """
-        # Ensure parameters are synchronized
-        self.sync_parameters()
+        # Ensure parameter cache is up to date
+        self._update_param_cache()
         
         # Check if we need to compute parameters
         needs_recompute = (
@@ -707,11 +657,11 @@ class EFGPND(nn.Module):
         OUT = (mtot,) * d
         xcen = torch.zeros(d, device=device, dtype=rdtype)
         
-        # Setup for training points
-        phi_train, finufft1, _ = setup_nufft(x, xcen, h, nufft_eps, cdtype)
+        # Setup for training points - use our NUFFT class
+        nufft_op = NUFFT(x, xcen, h, nufft_eps, cdtype=cdtype, device=device)
     
         # Compute right-hand side for mean
-        right_hand_side = ws * finufft1(phi_train, y, OUT=OUT)
+        right_hand_side = ws * nufft_op.type1(y, out_shape=OUT)
     
         # Setup Toeplitz operator
         m_conv = (mtot - 1) // 2
@@ -832,12 +782,12 @@ class EFGPND(nn.Module):
             xcen = torch.zeros(d, device=device, dtype=rdtype)
             OUT = (mtot,) * d
             
-            # Setup NUFFT for prediction points
-            phi_test, _, finufft2 = setup_nufft(x_new, xcen, h, nufft_eps, cdtype)
+            # Setup NUFFT for prediction points using our NUFFT class
+            nufft_op = NUFFT(x_new, xcen, h, nufft_eps, cdtype=cdtype, device=device)
             
             # Compute predictive mean
             with record_function("predict_mean"):
-                yhat = finufft2(phi_test, ws * beta, OUT=OUT).real
+                yhat = nufft_op.type2(ws * beta, out_shape=OUT).real
             
             # Initialize results
             ytrg = {"mean": yhat}
@@ -1057,9 +1007,6 @@ class EFGPND(nn.Module):
                 except (ValueError, IndexError) as e:
                     if verbose:
                         print(f"Note: Could not apply lengthscale constraint: {e}")
-                
-                # Sync parameters after optimization step
-                self.sync_parameters()
             
             # Log progress
             if it % log_interval == 0 or it == max_iters - 1:
@@ -1098,9 +1045,10 @@ class EFGPND(nn.Module):
 # # Helpers
 # # ──────────────────────────────────────────────────────────────────────
 def _cmplx(real_dtype: torch.dtype) -> torch.dtype:
-    """Matching complex dtype for a given real dtype."""
     return torch.complex64 if real_dtype == torch.float32 else torch.complex128
 
+
+## FFT based Toeplitz matrix-vector product
 # TODO - work out when to do the force_pow2 etc 
 class ToeplitzND:
     """
@@ -1263,108 +1211,204 @@ def compute_convolution_vector_vectorized_dD(m: int, x: torch.Tensor, h: float) 
     Multi‑D type‑1 NUFFT convolution vector:
       v[k1,...,kd] = sum_n exp(2πi <k, x_n>)
     """
-    device      = x.device
-    dtype_real  = x.dtype
-    dtype_cmplx = torch.complex64 if dtype_real == torch.float32 else torch.complex128
+    device = x.device
+    dtype_real = x.dtype
+    dtype_cmplx = _cmplx(dtype_real)
+    
     if x.ndim == 1:
         x = x[:, None]
-    N, d        = x.shape
-    eps         = 6e-8
-
-    # (d, N) array of phases
-    phi = (2 * math.pi * h * x).T.contiguous().to(dtype_real)
-
-    # all weights = 1 + 0i
+    N, d = x.shape
+    
+    # Create a temporary center point
+    xcen = torch.zeros(d, device=device, dtype=dtype_real)
+    
+    # Create all weights = 1 + 0i
     c = torch.ones(N, dtype=dtype_cmplx, device=device)
-
-    # output grid size in each of the d dims
+    
+    # Output grid size in each of the d dims
     OUT = tuple([4*m + 1] * d)
-
-    v = pff.finufft_type1(
-        phi,    # (d, N)
-        c,      # (N,)
-        OUT,
-        eps=eps,
-        isign=-1,
-        modeord=False
-    )
+    
+    # Use our NUFFT class
+    nufft_op = NUFFT(x, xcen, h, eps=6e-8, cdtype=dtype_cmplx, device=device)
+    v = nufft_op.type1(c, out_shape=OUT)
+    
     return v
 
-# Add helper functions before the EFGPND class
+class NUFFT:
+    """
+    NUFFT (Non-Uniform Fast Fourier Transform) operations.
+    
+    This class provides a unified interface for both Type 1 (nonuniform → uniform)
+    and Type 2 (uniform → nonuniform) NUFFT operations, with consistent device
+    and dtype handling.
+    
+    Attributes:
+        phi: Phase factors for the points (d, N)
+        device: Device for computations
+        dtype: Real data type
+        cdtype: Complex data type
+        eps: Accuracy parameter for NUFFT
+        d: Dimensionality of the problem
+    """
+    
+    def __init__(self, x, xcen, h, eps, cdtype=None, device=None):
+        """
+        Initialize the NUFFT operator.
+        
+        Args:
+            x: Input points tensor of shape (N, d)
+            xcen: Center of domain, tensor of shape (d,)
+            h: Grid spacing parameter
+            eps: Accuracy parameter for NUFFT
+            cdtype: Complex data type (computed from x.dtype if not provided)
+            device: Device for computation (uses x.device if not provided)
+        """
+        self.device = device or x.device
+        self.dtype = x.dtype
+        self.cdtype = cdtype or _cmplx(self.dtype)
+        self.eps = eps
+        
+        # Compute phi for the input points: (d, N) array of phases
+        TWO_PI = 2 * math.pi
+        self.phi = (TWO_PI * h * (x - xcen)).T.contiguous().to(device=self.device, dtype=self.dtype)
+        self.d = self.phi.shape[0]  # Dimensionality
+        
+    def type1(self, vals, out_shape=None):
+        """
+        Type 1 NUFFT: nonuniform → uniform (adjoint).
+        
+        Args:
+            vals: Values at nonuniform points, tensor of shape (N,) or (B, N)
+            out_shape: Output shape tuple, computed if not provided
+            
+        Returns:
+            Transformed values on uniform grid, flattened to 1D or batched
+        """
+        # Ensure vals is on the correct device and has the right dtype
+        vals = vals.to(device=self.device)
+        if vals.dtype != self.cdtype:
+            vals = vals.to(dtype=self.cdtype)
+            
+        # Ensure contiguous memory layout
+        if not vals.is_contiguous():
+            vals = vals.contiguous()
+            
+        # Compute output shape if not provided
+        if out_shape is None:
+            # Default behavior: estimate grid size from number of points
+            n_pts = self.phi.shape[1]
+            m_per_dim = int(n_pts**(1/self.d) + 0.5)  # Round to nearest integer
+            out_shape = (m_per_dim,) * self.d
+            
+        # Run the NUFFT operation
+        result = pff.finufft_type1(
+            self.phi, vals, out_shape,
+            eps=self.eps, isign=-1, modeord=False
+        )
+        
+        # Ensure correct dtype
+        if result.dtype != self.cdtype:
+            result = result.to(dtype=self.cdtype)
+            
+        # Return flattened result if input was 1D
+        if vals.ndim == 1:
+            return result.view(-1)
+        else:
+            # For batched input, preserve batch dimension
+            return result
+            
+    def type2(self, fk, out_shape=None):
+        """
+        Type 2 NUFFT: uniform → nonuniform (forward).
+        
+        Args:
+            fk: Values on uniform grid, can be 1D flattened or with batch dimension
+            out_shape: Output shape tuple, computed if not provided
+            
+        Returns:
+            Transformed values at nonuniform points
+        """
+        # Handle input dimensionality
+        is_batched = fk.ndim > 1
+        
+        # Ensure input is on the correct device and has the right dtype
+        fk = fk.to(device=self.device)
+        if fk.dtype != self.cdtype:
+            fk = fk.to(dtype=self.cdtype)
+            
+        # Compute output shape if not provided
+        if out_shape is None:
+            if is_batched:
+                batch_size = fk.shape[0]
+                n_pts = fk.shape[1]
+                m_per_dim = int(n_pts**(1/self.d) + 0.5)
+                out_shape = (batch_size,) + (m_per_dim,) * self.d
+            else:
+                n_pts = fk.shape[0]
+                m_per_dim = int(n_pts**(1/self.d) + 0.5)
+                out_shape = (m_per_dim,) * self.d
+        
+        # Reshape for NUFFT
+        if is_batched:
+            # For batched input, need to include batch dimension in reshape
+            fk_nd = fk.reshape(out_shape).contiguous()
+        else:
+            fk_nd = fk.reshape(out_shape).contiguous()
+            
+        # Run the NUFFT operation
+        return pff.finufft_type2(
+            self.phi, fk_nd,
+            eps=self.eps, isign=+1, modeord=False
+        )
 
 def setup_nufft(x, xcen, h, nufft_eps, cdtype):
-    """Helper function to set up NUFFT parameters and helper functions."""
-    TWO_PI = 2 * math.pi
+    """
+    DEPRECATED: Use NUFFT class instead. 
+    This function is kept for backward compatibility but will be removed in a future version.
     
-    # Compute phi for the input points
-    phi = (TWO_PI * h * (x - xcen)).T.contiguous()
-    d = phi.shape[0]  # Get dimensionality
+    Creates a NUFFT operator and returns the phi (phase) and transform functions.
+    """
+    # Create a NUFFT object
+    nufft_op = NUFFT(x, xcen, h, nufft_eps, cdtype=cdtype)
     
+    # Return phi and wrapper functions for backward compatibility
     def finufft1(phi_in, vals, OUT=None):
-        """
-        Adjoint NUFFT: nonuniform→uniform.
-        """
-        phi_in = phi_in.contiguous()
-        vals = vals.contiguous()
-        if vals.dtype != cdtype:
-            vals = vals.to(dtype=cdtype)
-            
-        # Use provided OUT shape or default
-        if OUT is None:
-            # This is an approximation - in practice, OUT should be passed explicitly for finufft1
-            n_pts = phi_in.shape[1]
-            d_loc = phi_in.shape[0]
-            m_per_dim = int(n_pts**(1/d_loc) + 0.5)  # Round to nearest integer
-            OUT = (m_per_dim,) * d_loc
+        return nufft_op.type1(vals, out_shape=OUT)
         
-        fk = pff.finufft_type1(phi_in, vals, OUT, eps=nufft_eps, isign=-1, modeord=False)
-        if fk.dtype != cdtype:
-            fk = fk.to(dtype=cdtype)
-        return fk.view(-1)
-
     def finufft2(phi_in, fk_flat, OUT=None):
-        """
-        Forward NUFFT: uniform→nonuniform.
-        """
-        phi_in = phi_in.contiguous()
-        
-        # If OUT not specified, infer it
-        if OUT is None:
-            n_pts = fk_flat.shape[0]
-            d_loc = phi_in.shape[0]
-            m_per_dim = int(n_pts**(1/d_loc) + 0.5)  # Round to nearest integer
-            OUT = (m_per_dim,) * d_loc
-            
-        fk_nd = fk_flat.view(OUT).to(dtype=cdtype).contiguous()
-        if fk_nd.dtype != cdtype:
-            fk_nd = fk_nd.to(dtype=cdtype)
-        return pff.finufft_type2(phi_in, fk_nd, eps=nufft_eps, isign=+1, modeord=False)
+        return nufft_op.type2(fk_flat, out_shape=OUT)
     
-    return phi, finufft1, finufft2
+    return nufft_op.phi, finufft1, finufft2
 
 def setup_operators(ws, toeplitz, sigmasq_scalar, cdtype):
     """Helper function to set up operator functions."""
     ns_shape = tuple(toeplitz.ns)
     ws_block = ws.view(1, *ns_shape)
     
-    # Create the basic weighted Toeplitz function
-    def Gv(v):
-        return ws * toeplitz(ws * v)
-    
-    def A_mean(beta):
-        beta = beta.to(dtype=cdtype)
-        wbeta = ws * beta
-        Twbeta = toeplitz(wbeta)
-        return ws * Twbeta + sigmasq_scalar * beta
+    # Core weighted Toeplitz function that handles both batched and non-batched inputs
 
+    # D F^*F D operation 
+    def Gv(v):
+        v = v.to(dtype=cdtype)
+        is_batch = v.ndim > 1
+        
+        if not is_batch:
+            return ws * toeplitz(ws * v)
+        else:
+            # Handle batched inputs
+            shape_in = (v.shape[0], *ns_shape)
+            v_block = v.view(shape_in)
+            Tv = toeplitz(ws_block * v_block)
+            result = ws_block * Tv
+            return result.view(v.shape)
+    
+    # D F^*F D + sigma^2 I 
+    def A_mean(beta):
+        return Gv(beta) + sigmasq_scalar * beta
+
+    # D F^*F D/sigma^2 + I 
     def A_var(gamma):
-        is_batch = gamma.ndim > 1
-        gamma = gamma.to(dtype=cdtype)
-        shape_in = (gamma.shape[0], *ns_shape) if is_batch else (1, *ns_shape)
-        g_block = gamma.view(shape_in)
-        Tg = toeplitz(ws_block * g_block)
-        out_block = ws_block * Tg / sigmasq_scalar + g_block
-        return out_block.view(gamma.shape)
+        return Gv(gamma) / sigmasq_scalar + gamma
     
     return A_mean, A_var, Gv
 
@@ -1397,8 +1441,13 @@ def nufft_var_est_nd(est_sums, h_val, x_center, pts, eps_val):
     B_loc, d_loc = pts.shape
     if est_sums.ndim != d_loc:
         raise ValueError("est_sums wrong dimensionality")
-    phi = (2 * math.pi * h_val * (pts - x_center[None, :])).T.contiguous()
-    return pff.finufft_type2(phi, est_sums, eps=eps_val, isign=+1, modeord=True).real
+    
+    # Create a NUFFT operator for this operation
+    cdtype = _cmplx(pts.dtype)
+    nufft_op = NUFFT(pts, x_center, h_val, eps=eps_val, cdtype=cdtype)
+    
+    # Special case: we need modeord=True for this operation
+    return pff.finufft_type2(nufft_op.phi, est_sums, eps=eps_val, isign=+1, modeord=True).real
 
 
 # ------------------------------------------------------------
@@ -1526,10 +1575,10 @@ def compute_prediction_variance(x_new, xis, ws, A_var, cg_tol, max_cg_iter, vari
 
     if variance_method.lower() == 'regular':
         # Exact CG with microbatching for large x_new
-        # TODO - work out the batching .. don't know what I'm doing with this I, but I run out of memory otherwise.
         microbatch = 8192  
         out = []
         for xb in torch.split(x_new, microbatch, dim=0):  # (b, d)
+            # Use direct matrix multiplication instead of NUFFT for this method
             fx = torch.exp(TWO_PI * 1j * (xb @ xis.T)).to(cdtype)  # (b, m)
             rhs = ws * fx.conj()  # (b, m)
             gamma = BatchConjugateGradients(
@@ -1550,7 +1599,7 @@ def compute_prediction_variance(x_new, xis, ws, A_var, cg_tol, max_cg_iter, vari
             A_var, J, xis, max_cg_iter, cg_tol, ws
         )
         
-        # Compute variance
+        # Compute variance using our NUFFT class wrapper
         pvar = nufft_var_est_nd(
             est_sums, h, xcen, x_new, nufft_eps
         )
