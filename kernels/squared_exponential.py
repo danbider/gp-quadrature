@@ -1,163 +1,217 @@
 import math
 import torch
-from typing import List, Tuple
+import numpy as np
+from typing import List, Tuple, Optional
 from pydantic import Field
 
 from .kernel import Kernel
 
 class SquaredExponential(Kernel):
     """
-    Squared-exponential kernel function and Fourier transform, general dim.
+    Squared Exponential (RBF) kernel.
+    
+    k(r) = variance * exp(-0.5 * r^2 / lengthscale^2)
+    
+    where r is the Euclidean distance between inputs.
     """
-    dimension: int = Field(..., ge=1)  # dimension, integer greater or equal to 1
-    lengthscale: float = Field(..., gt=0)   # lengthscale, positive float
-    variance: float = Field(1.0, gt=0) # variance, positive float
-    num_hypers: int = Field(3, frozen=True)  # number of hyperparameters
-    hypers: List[str] = Field(default_factory=lambda: ['lengthscale', 'variance'], frozen=True)
-
+    
+    # Define parameter names for this kernel
+    hypers: List[str] = Field(default=['lengthscale', 'variance'], frozen=True)
+    num_hypers: int = Field(default=3, frozen=True)  # includes noise variance
+    
+    # Initial hyperparameter values (used during initialization)
+    init_lengthscale: float = Field(default=float('nan'), ge=1e-6)
+    init_variance: float = Field(default=float('nan'), ge=1e-6)
+    
+    @property
+    def lengthscale(self) -> float:
+        """Property that uses get_hyper to retrieve the lengthscale."""
+        return self.get_hyper('lengthscale')
+    
+    @lengthscale.setter
+    def lengthscale(self, value: float) -> None:
+        """Setter for lengthscale property that uses set_hyper."""
+        self.set_hyper('lengthscale', value)
+    
+    @property
+    def variance(self) -> float:
+        """Property that uses get_hyper to retrieve the variance."""
+        return self.get_hyper('variance')
+    
+    @variance.setter
+    def variance(self, value: float) -> None:
+        """Setter for variance property that uses set_hyper."""
+        self.set_hyper('variance', value)
+    
     def kernel(self, distance: torch.Tensor) -> torch.Tensor:
         """
-        Compute the kernel of the Squared-exponential kernel at distance distance.
+        Compute the SE kernel at the given distances.
+        
         Args:
-            distance: distance, tensor of shape (n, d)
+            distance: Tensor of distances of shape (n,) or (n, m)
+            
         Returns:
-            kernel, tensor of shape (n,)
+            Kernel values of same shape as distance
         """
-        ls = self.get_hyper('lengthscale')
-        var = self.get_hyper('variance')
-        return var * torch.exp(-0.5 * (distance/ls)**2)
-
+        # Get current parameter values from GPParams
+        lengthscale = self.get_hyper('lengthscale')
+        variance = self.get_hyper('variance')
+        
+        # Compute kernel
+        scaled_dist = distance / lengthscale
+        return variance * torch.exp(-0.5 * scaled_dist**2)
+    
     def spectral_density(self, xid: torch.Tensor) -> torch.Tensor:
         """
-        Compute the spectral density of the Squared-exponential kernel at frequency xid.
+        Compute the spectral density at the frequency xid.
+        
+        The spectral density of the SE kernel is:
+        S(w) = (2π * lengthscale^2)^(d/2) * variance * exp(-2π^2 * lengthscale^2 * |w|^2)
+        
         Args:
-            xid: frequency, tensor of shape (n, d)
+            xid: Frequency tensor of shape (n, d) or (n,)
+            
         Returns:
-            spectral density, tensor of shape (n,)
+            Spectral density of shape (n,)
         """
+        # Get parameters
+        lengthscale = self.get_hyper('lengthscale')
+        variance = self.get_hyper('variance')
+        
         # Ensure xid is 2D
         if xid.ndim == 1:
             xid = xid.unsqueeze(-1)
-        ls = self.get_hyper('lengthscale')
-        var = self.get_hyper('variance')
-        return var * (2*math.pi*ls**2)**(self.dimension/2) * torch.exp(-2*math.pi**2*ls**2 * torch.sum(xid**2, dim=-1))
-
+            
+        # Compute squared norm along last dimension
+        xid_norm_sq = torch.sum(xid**2, dim=-1)
+        
+        # Compute spectral density
+        two_pi_sq = (2 * np.pi)**2
+        prefactor = ((2 * np.pi) * lengthscale**2)**(self.dimension/2) * variance
+        return prefactor * torch.exp(-two_pi_sq * lengthscale**2 * xid_norm_sq / 2)
+    
     def spectral_grad(self, xid: torch.Tensor) -> torch.Tensor:
         """
-        Compute the gradient of the spectral density S(xid) with respect to the hyperparameters
-        θ = (lengthscale, variance). The gradients are given by:
-        
-            ∂S/∂σ² = S(xid) / σ²,
-            ∂S/∂ℓ  = S(xid) * (dimension/ℓ - 4π²ℓ*Σxid_i²)
+        Compute the gradient of the spectral density with respect to hyperparameters.
         
         Args:
-            xid: frequency, tensor of shape (n,) or (n, d)
+            xid: Frequency tensor of shape (n, d) or (n,)
             
         Returns:
-            A tensor of shape (n, 2) where each row contains the gradients 
-            [∂S/∂lengthscale, ∂S/∂variance] evaluated at the corresponding frequency.
+            Gradient tensor of shape (n, 2) - [∂S/∂l, ∂S/∂σ²]
         """
+        # Get parameters
+        lengthscale = self.get_hyper('lengthscale')
+        variance = self.get_hyper('variance')
+        
         # Ensure xid is 2D
         if xid.ndim == 1:
             xid = xid.unsqueeze(-1)
             
-        # Compute the spectral density S(xid)
-        S = self.spectral_density(xid)
+        # Compute squared norm along last dimension
+        xid_norm_sq = torch.sum(xid**2, dim=-1)
         
-        ls = self.get_hyper('lengthscale')
-        var = self.get_hyper('variance')
+        # Compute base spectral density
+        two_pi_sq = (2 * np.pi)**2
+        prefactor = ((2 * np.pi) * lengthscale**2)**(self.dimension/2) * variance
+        s_w = prefactor * torch.exp(-two_pi_sq * lengthscale**2 * xid_norm_sq / 2)
         
-        # Gradient with respect to variance: ∂S/∂variance = S / variance
-        dS_dvariance = S / var
+        # Gradients
+        dl = s_w * (self.dimension / lengthscale - two_pi_sq * lengthscale * xid_norm_sq)
+        dv = s_w / variance
         
-        # Compute sum of squared frequencies across dimensions
-        xid_squared_sum = torch.sum(xid**2, dim=-1)
-        
-        # Gradient with respect to lengthscale:
-        # ∂S/∂lengthscale = S * (dimension/lengthscale - 4π² * lengthscale * Σxid_i²)
-        dS_dlengthscale = S * ((self.dimension / ls) - 4 * math.pi**2 * ls * xid_squared_sum)
-        
-        # Stack the gradients so that the last dimension contains [dS/dlengthscale, dS/dvariance]
-        grad = torch.stack([dS_dlengthscale, dS_dvariance], dim=-1) # in the same order as hypers 
-        return grad
-        
+        return torch.stack([dl, dv], dim=-1)
+    
     def log_marginal(self, x: torch.Tensor, y: torch.Tensor, sigmasq: float) -> float:
         """
-        Compute the log marginal likelihood of the Squared-exponential kernel.
+        Compute the log marginal likelihood for the SE kernel.
+        
         Args:
-            x: input tensor of shape (n, d)
-            y: output tensor of shape (n,)
-            sigmasq: noise variance
+            x: Input tensor of shape (n, d) or (n,)
+            y: Target tensor of shape (n,)
+            sigmasq: Noise variance
+            
         Returns:
-            log marginal likelihood, float
+            Log marginal likelihood value
         """
         # Ensure x is 2D
-        if x.ndim == 1 and self.dimension > 1:
+        if x.ndim == 1:
             x = x.unsqueeze(-1)
             
-        # Compute kernel matrix with noise
-        K = self.kernel_matrix(x, x) + sigmasq * torch.eye(x.shape[0], device=x.device)
+        n = x.shape[0]
         
-        # Compute Cholesky decomposition
-        L = torch.linalg.cholesky(K)
+        # Compute kernel matrix
+        K = self.kernel_matrix(x, x)
         
-        # Solve system for alpha
-        alpha = torch.linalg.solve(L.T, torch.linalg.solve(L, y))
+        # Add noise variance to diagonal
+        K_noise = K + sigmasq * torch.eye(n, device=K.device)
         
-        # Compute log determinant term
-        logdet = 2 * torch.sum(torch.log(torch.diagonal(L)))
-        
-        # Return log marginal likelihood
-        return -0.5 * (torch.dot(y, alpha) + logdet + x.shape[0] * math.log(2 * math.pi))
+        # Compute log marginal likelihood
+        # log p(y|X) = -0.5 * (y^T K_noise^-1 y + log |K_noise| + n log(2π))
+        try:
+            L = torch.linalg.cholesky(K_noise)
+            alpha = torch.cholesky_solve(y.unsqueeze(-1), L).squeeze(-1)
+            
+            # Compute terms
+            data_fit = 0.5 * torch.sum(y * alpha)
+            complexity = torch.sum(torch.log(torch.diag(L)))
+            constant = 0.5 * n * np.log(2 * np.pi)
+            
+            return -(data_fit + complexity + constant).item()
+        except RuntimeError:
+            # Fallback if Cholesky decomposition fails
+            return float('-inf')
     
     def estimate_hyperparameters(self, x: torch.Tensor, y: torch.Tensor, K: int = 1000) -> Tuple[float, float, float]:
         """
-        Estimate initial hyperparameters for SquaredExponential kernel based on data characteristics.
+        Estimate reasonable initial hyperparameters based on data characteristics.
+        
+        For the SE kernel:
+        - lengthscale: Use median distance between randomly selected points
+        - variance: Set to variance of target values
+        - noise_var: Set to a small fraction of target variance
         
         Args:
             x: Input features tensor of shape (n, d)
             y: Target values tensor of shape (n,)
-            K: Sample size for estimation (default: 1000)
-        
+            K: Number of random points to sample for lengthscale estimation
+            
         Returns:
-            Tuple containing:
-                - lengthscale: Estimated length scale
-                - variance: Estimated signal variance
-                - noise_var: Estimated noise variance (10% of y variance)
+            Tuple of (lengthscale, variance, noise_var)
         """
-        # Get a random sample of x of size K
-        if x.shape[0] > K:
-            random_indices = torch.randperm(x.shape[0])[:K]
-            x_sample = x[random_indices]
-            y_sample = y[random_indices]
+        # Ensure x is 2D
+        if x.ndim == 1:
+            x = x.unsqueeze(-1)
+            
+        n, d = x.shape
+        
+        # Compute target variance for signal variance estimate
+        y_var = torch.var(y).item()
+        
+        # Estimate lengthscale using median distance heuristic
+        if n > K:
+            # Randomly sample K points if dataset is large
+            idx = torch.randperm(n)[:K]
+            x_sample = x[idx]
         else:
             x_sample = x
-            y_sample = y
+            
+        # Compute pairwise distances
+        dists = torch.cdist(x_sample, x_sample)
         
-        # Calculate pairwise distances between all points in x_sample
-        pairwise_distances = torch.cdist(x_sample, x_sample)
+        # Compute median of non-zero distances
+        mask = dists > 0
+        median_dist = torch.median(dists[mask]).item()
 
-        # Set diagonal elements to infinity to exclude self-distances
-        mask = torch.eye(x_sample.shape[0], device=x_sample.device).bool()
-        pairwise_distances[mask] = float('inf')
-
-        # Calculate the minimum distance for each point
-        min_distances = torch.min(pairwise_distances, dim=1).values
-
-        # Calculate the median of these minimum distances
-        median_distance = torch.median(min_distances)
-
-        # Estimate lengthscale as half the median distance between nearest neighbors
-        lengthscale = 10*median_distance.item()
-
-        # Calculate the variance of y_sample
-        y_var = torch.var(y_sample).item()
-
-        # Estimate signal variance as 90% of y variance
-        signal_var = 0.9 * y_var
+            
+        # Set lengthscale to median distance
+        lengthscale = 0.5*median_dist
         
-        # Estimate noise variance as 10% of y variance
-        noise_var = 0.1 * y_var
+        # Set variance to target variance
+        variance = y_var
         
-        return lengthscale, signal_var, noise_var
+        # Set noise variance to small fraction of target variance
+        noise_var = 0.01 * y_var
+        
+        return lengthscale, variance, noise_var
     

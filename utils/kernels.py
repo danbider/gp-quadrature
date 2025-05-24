@@ -103,10 +103,10 @@ def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, u
         hm = math.ceil(Lfreq / h_spacing)  # half number of nodes to cover [-Lfreq,Lfreq]
     else:
         if isinstance(kernel_obj, Matern): # heuristic for matern kernel
-            l = kernel_obj.lengthscale
+            l = kernel_obj.get_hyper('lengthscale')
             nu = kernel_obj.nu
             dim = kernel_obj.dimension
-            eps_use = eps / kernel_obj.variance
+            eps_use = eps / kernel_obj.get_hyper('variance')
             if l2scaled:
                 # L2 norm of the kernel k
                 rl2sq = ((2*nu/math.pi/l**2)**(dim/2) * kernel_obj.spectral_density(torch.tensor(0, device='cpu', dtype=dtype))**2 / 2 *
@@ -119,9 +119,9 @@ def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, u
             hm = math.ceil((math.pi**(nu+dim/2) * l**(2*nu) * eps/0.15)**(-1/(2*nu+dim/2)) / h_spacing)  # heuristic \eqref{mheur}
         
         elif isinstance(kernel_obj, SquaredExponential): # heuristic for se kernel
-            l = kernel_obj.lengthscale
+            l = kernel_obj.get_hyper('lengthscale')
             dim = kernel_obj.dimension
-            var = kernel_obj.variance
+            var = kernel_obj.get_hyper('variance')
             eps_use = eps / var
             if l2scaled:
                 rl2sq = kernel_obj.kernel(torch.tensor(0, device='cpu', dtype=dtype))**2 * (math.sqrt(math.pi)*l**2)**dim

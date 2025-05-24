@@ -1,220 +1,305 @@
 import math
 import torch
-from typing import List, Tuple
+import numpy as np
+from typing import List, Tuple, Optional
 from pydantic import Field, field_validator
 
 from .kernel import Kernel
 
 class Matern(Kernel):
     """
-    Matérn kernel with different smoothness hyperparameters, specified by the name.
-    Currently supports Matérn 1/2, 3/2, and 5/2.
+    Matérn kernel.
+    
+    k(r) = variance * 2^(1-nu) / Gamma(nu) * (sqrt(2*nu) * r / lengthscale)^nu * K_nu(sqrt(2*nu) * r / lengthscale)
+    
+    where:
+    - r is the Euclidean distance between inputs
+    - K_nu is the modified Bessel function of the second kind
+    - nu controls the smoothness
+    
+    When nu = 1/2, the Matérn kernel becomes the exponential kernel.
+    When nu = infinity, it becomes the squared exponential kernel.
+    Common values are nu = 1/2, 3/2, 5/2.
     """
-    dimension: int = Field(..., ge=1)  # dimension, integer greater or equal to 1
-    name: str = Field(..., pattern='^(matern12|matern32|matern52)$')
-    lengthscale: float = Field(..., gt=0)   # lengthscale, positive float
-    variance: float = Field(1.0, gt=0) # variance, positive float
-    nu: float = Field(None)       # smoothness parameter, will be set in model_post_init
-    num_hypers: int = Field(3, frozen=True)  # number of hyperparameters: lengthscale, variance, noise variance 
-    hypers: List[str] = Field(default_factory=lambda: ['lengthscale', 'variance'], frozen=True)
-
-    def model_post_init(self, __context):
-        """
-        Set the smoothness parameter nu based on the name after initialization.
-        """
-        nu_values = {
-            'matern12': 0.5,
-            'matern32': 1.5,
-            'matern52': 2.5
-        }
-        self.nu = nu_values[self.name]
-
+    # Define parameter names for this kernel
+    hypers: List[str] = Field(default=['lengthscale', 'variance', 'nu'], frozen=True)
+    num_hypers: int = Field(default=4, frozen=True)  # includes noise variance
+    
+    # Initial hyperparameter values (used during initialization)
+    init_lengthscale: float = Field(default=float('nan'), ge=1e-6)
+    init_variance: float = Field(default=float('nan'), ge=1e-6)
+    init_nu: float = Field(default=2.5, ge=0.1, le=10.0, description="Smoothness parameter")
+    
+    @property
+    def lengthscale(self) -> float:
+        """Property that uses get_hyper to retrieve the lengthscale."""
+        return self.get_hyper('lengthscale')
+    
+    @lengthscale.setter
+    def lengthscale(self, value: float) -> None:
+        """Setter for lengthscale property that uses set_hyper."""
+        self.set_hyper('lengthscale', value)
+    
+    @property
+    def variance(self) -> float:
+        """Property that uses get_hyper to retrieve the variance."""
+        return self.get_hyper('variance')
+    
+    @variance.setter
+    def variance(self, value: float) -> None:
+        """Setter for variance property that uses set_hyper."""
+        self.set_hyper('variance', value)
+    
+    @property
+    def nu(self) -> float:
+        """Property that uses get_hyper to retrieve the nu parameter."""
+        return self.get_hyper('nu')
+    
+    @nu.setter
+    def nu(self, value: float) -> None:
+        """Setter for nu property that uses set_hyper."""
+        self.set_hyper('nu', value)
+    
     def kernel(self, distance: torch.Tensor) -> torch.Tensor:
         """
-        Compute the kernel of the Matern kernel at distance distance. The formula depends on the nu parameter. 
-        Args:
-            distance: distance, tensor of shape (n,) or (n, m)
-        Returns:
-            kernel, tensor of shape (n,) or (n, m)
-        """
-        # Handle scalar or array inputs
-        scaled_dist = torch.abs(distance) / self.lengthscale
-
-        if self.name == 'matern12':
-            return self.variance * torch.exp(-scaled_dist)
-        elif self.name == 'matern32':
-            return self.variance * (1 + math.sqrt(3) * scaled_dist) * torch.exp(-math.sqrt(3) * scaled_dist)
-        elif self.name == 'matern52':
-            return self.variance * (1 + math.sqrt(5) * scaled_dist + 5 * scaled_dist**2 / 3) * torch.exp(-math.sqrt(5) * scaled_dist)
-
-    def spectral_density(self, xid: torch.Tensor) -> torch.Tensor:
-        r"""
-        Compute the spectral density of the Matern kernel at frequency xid.
-        Mathematical formula (for d>=1):
-
-        .. math::
-
-            \hat{k}(xid) = \frac{\sigma^2}{l^{2\nu} (2\sqrt{\pi})^{d} \Gamma(\nu) \Gamma(\nu + d/2)} (2\nu/l^2 + 4\pi^2 xid^2)^{-\nu - d/2}
-
-        Args:
-            xid: frequency, tensor of shape (n,) or (n, d)
-        Returns:
-            spectral density, tensor of shape (n,)
-        """
-        # Ensure xid is 2D for consistent handling
-        if xid.ndim == 1:
-            xid = xid.unsqueeze(-1)
-
-        # Calculate the squared norm of frequencies
-        xid_squared_sum = torch.sum(xid**2, dim=-1)
-
-        scaling = ((2 * math.sqrt(math.pi))**self.dimension * math.gamma(self.nu + self.dimension/2) * (2*self.nu)**self.nu / 
-                   (math.gamma(self.nu) * self.lengthscale**(2*self.nu)))
-        return self.variance * scaling * (2*self.nu/self.lengthscale**2 + (4*math.pi**2) * xid_squared_sum)**(-(self.nu + self.dimension/2))
-
-    def spectral_grad(self, xid: torch.Tensor) -> torch.Tensor:
-        """
-        Compute the gradient of the spectral density with respect to the hyperparameters
-        θ = (lengthscale, variance).
+        Compute the Matérn kernel at the given distances.
         
         Args:
-            xid: frequency, tensor of shape (n,) or (n, d)
+            distance: Tensor of distances of shape (n,) or (n, m)
             
         Returns:
-            A tensor of shape (n, 2) where each row contains the gradients 
-            [∂S/∂lengthscale, ∂S/∂variance] evaluated at the corresponding frequency.
+            Kernel values of same shape as distance
         """
+        # Get current parameter values from GPParams
+        lengthscale = self.get_hyper('lengthscale')
+        variance = self.get_hyper('variance')
+        nu = self.get_hyper('nu')
+        
+        # Handle nu = 0.5 (exponential kernel)
+        if abs(nu - 0.5) < 1e-6:
+            scaled_dist = torch.sqrt(2.0) * distance / lengthscale
+            K = variance * torch.exp(-scaled_dist)
+            return K
+            
+        # Handle nu = 1.5
+        elif abs(nu - 1.5) < 1e-6:
+            scaled_dist = torch.sqrt(3.0) * distance / lengthscale
+            K = variance * (1.0 + scaled_dist) * torch.exp(-scaled_dist)
+            return K
+            
+        # Handle nu = 2.5
+        elif abs(nu - 2.5) < 1e-6:
+            scaled_dist = torch.sqrt(5.0) * distance / lengthscale
+            K = variance * (1.0 + scaled_dist + scaled_dist**2/3.0) * torch.exp(-scaled_dist)
+            return K
+            
+        # For other nu values, use a general implementation
+        else:
+            # For small distances, avoid numerical issues
+            eps = 1e-8
+            scaled_dist = torch.sqrt(2.0 * nu) * distance / lengthscale
+            scaled_dist = torch.clamp(scaled_dist, min=eps)
+            
+            # We use the bessel_kv function for the modified Bessel function
+            try:
+                from scipy import special
+                bessel = special.kv(nu, scaled_dist.cpu().numpy())
+                bessel = torch.tensor(bessel, device=distance.device, dtype=distance.dtype)
+            except ImportError:
+                # Fallback to approximation for common nu values
+                raise RuntimeError("scipy is required for Matérn kernel with custom nu values")
+                
+            # Compute prefactor terms
+            gamma_term = torch.tensor(special.gamma(nu), device=distance.device, dtype=distance.dtype)
+            prefactor = variance * 2**(1-nu) / gamma_term
+            
+            # Final kernel value
+            K = prefactor * scaled_dist**nu * bessel
+            
+            # Handle numerical instabilities
+            K = torch.nan_to_num(K, nan=variance, posinf=variance, neginf=0.0)
+            
+            return K
+    
+    def spectral_density(self, xid: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the spectral density at the frequency xid.
+        
+        The spectral density of the Matérn kernel is:
+        S(w) = variance * Γ(nu + d/2) / (Γ(nu) * π^(d/2)) * 
+               (2*nu/lengthscale^2 + 4π^2*|w|^2)^(-(nu+d/2))
+               
+        Args:
+            xid: Frequency tensor of shape (n, d) or (n,)
+            
+        Returns:
+            Spectral density of shape (n,)
+        """
+        # Get parameters
+        lengthscale = self.get_hyper('lengthscale')
+        variance = self.get_hyper('variance')
+        nu = self.get_hyper('nu')
+        d = self.dimension
+        
         # Ensure xid is 2D
         if xid.ndim == 1:
             xid = xid.unsqueeze(-1)
             
-        # Compute the spectral density S(xid)
-        S = self.spectral_density(xid)
+        # Compute squared norm along last dimension
+        xid_norm_sq = torch.sum(xid**2, dim=-1)
         
-        # Gradient with respect to variance: ∂S/∂variance = S / variance
-        dS_dvariance = S / self.variance
+        # Compute terms for spectral density
+        from scipy import special
+        gamma_nu = special.gamma(nu)
+        gamma_nud2 = special.gamma(nu + d/2)
+        pi_d2 = np.pi**(d/2)
         
-        # Compute sum of squared frequencies across dimensions
-        xid_squared_sum = torch.sum(xid**2, dim=-1)
+        # Compute denominator term
+        denom = (2 * nu) / lengthscale**2 + 4 * np.pi**2 * xid_norm_sq
         
-        # For the Matern kernel, the spectral density is proportional to:
-        # S(xid) ∝ (2*nu/l^2 + 4*pi^2*|xid|^2)^(-(nu+d/2))
-        # and includes a scaling factor with l^(-2*nu)
+        # Compute spectral density
+        spec_density = variance * gamma_nud2 / (gamma_nu * pi_d2) * denom**(-(nu + d/2))
         
-        # Define the denominator term
-        denominator = 2*self.nu/self.lengthscale**2 + (4*math.pi**2) * xid_squared_sum
-        
-        # The gradient has two components from the chain rule:
-        # 1. From l^(-2*nu): -2*nu/l * S
-        # 2. From (...)^(-(nu+d/2)): (-(nu+d/2)) * (-4*nu/l^3) / denominator * S
-        
-        # Combined gradient with respect to lengthscale
-        power = -(self.nu + self.dimension/2)
-        exponent_grad = power * (-4*self.nu/self.lengthscale**3) / denominator
-        dS_dlengthscale = S * (-2*self.nu/self.lengthscale + exponent_grad)
-        
-        # Stack the gradients
-        grad = torch.stack([dS_dlengthscale, dS_dvariance], dim=-1)
-        return grad
-        
-    def log_marginal(self, x: torch.Tensor, y: torch.Tensor, sigmasq: float) -> float:
+        return spec_density
+    
+    def spectral_grad(self, xid: torch.Tensor) -> torch.Tensor:
         """
-        Compute the log marginal likelihood of the Matern kernel.
+        Compute the gradient of the spectral density with respect to hyperparameters.
         
         Args:
-            x: input tensor of shape (n, d) or (n,)
-            y: output tensor of shape (n,)
-            sigmasq: noise variance
+            xid: Frequency tensor of shape (n, d) or (n,)
             
         Returns:
-            log marginal likelihood, float
+            Gradient tensor of shape (n, 3) - [∂S/∂l, ∂S/∂σ², ∂S/∂ν]
+        """
+        # Get parameters
+        lengthscale = self.get_hyper('lengthscale')
+        variance = self.get_hyper('variance')
+        nu = self.get_hyper('nu')
+        d = self.dimension
+        
+        # Ensure xid is 2D
+        if xid.ndim == 1:
+            xid = xid.unsqueeze(-1)
+            
+        # Compute squared norm along last dimension
+        xid_norm_sq = torch.sum(xid**2, dim=-1)
+        
+        # Compute base spectral density
+        s_w = self.spectral_density(xid)
+        
+        # Compute the denominator
+        denom = (2 * nu) / lengthscale**2 + 4 * np.pi**2 * xid_norm_sq
+        
+        # Gradients
+        # For lengthscale: ∂S/∂l = S(w) * (2*nu*(nu+d/2)) / (l^3 * denom)
+        dl = s_w * (4 * nu * (nu + d/2)) / (lengthscale**3 * denom)
+        
+        # For variance: ∂S/∂σ² = S(w) / σ²
+        dv = s_w / variance
+        
+        # For nu: This is complex due to Gamma function derivatives
+        # Approximation: ∂S/∂ν ≈ S(w) * (log(denom) - ψ(ν+d/2) + ψ(ν))
+        from scipy import special
+        digamma_nu = special.digamma(nu)
+        digamma_nud2 = special.digamma(nu + d/2)
+        dnu = s_w * (np.log(denom) - digamma_nud2 + digamma_nu)
+        
+        return torch.stack([dl, dv, dnu], dim=-1)
+    
+    def log_marginal(self, x: torch.Tensor, y: torch.Tensor, sigmasq: float) -> float:
+        """
+        Compute the log marginal likelihood for the Matérn kernel.
+        
+        Args:
+            x: Input tensor of shape (n, d) or (n,)
+            y: Target tensor of shape (n,)
+            sigmasq: Noise variance
+            
+        Returns:
+            Log marginal likelihood value
         """
         # Ensure x is 2D
-        if x.ndim == 1 and self.dimension > 1:
+        if x.ndim == 1:
             x = x.unsqueeze(-1)
             
-        # Compute kernel matrix with noise
-        K = self.kernel_matrix(x, x) + sigmasq * torch.eye(x.shape[0], device=x.device)
+        n = x.shape[0]
         
-        # Compute Cholesky decomposition
-        L = torch.linalg.cholesky(K)
+        # Compute kernel matrix
+        K = self.kernel_matrix(x, x)
         
-        # Solve system for alpha
-        alpha = torch.linalg.solve(L.T, torch.linalg.solve(L, y))
+        # Add noise variance to diagonal
+        K_noise = K + sigmasq * torch.eye(n, device=K.device)
         
-        # Compute log determinant term
-        logdet = 2 * torch.sum(torch.log(torch.diagonal(L)))
-        
-        # Return log marginal likelihood
-        return -0.5 * (torch.dot(y, alpha) + logdet + x.shape[0] * math.log(2 * math.pi))
-
+        # Compute log marginal likelihood
+        # log p(y|X) = -0.5 * (y^T K_noise^-1 y + log |K_noise| + n log(2π))
+        try:
+            L = torch.linalg.cholesky(K_noise)
+            alpha = torch.cholesky_solve(y.unsqueeze(-1), L).squeeze(-1)
+            
+            # Compute terms
+            data_fit = 0.5 * torch.sum(y * alpha)
+            complexity = torch.sum(torch.log(torch.diag(L)))
+            constant = 0.5 * n * np.log(2 * np.pi)
+            
+            return -(data_fit + complexity + constant).item()
+        except RuntimeError:
+            # Fallback if Cholesky decomposition fails
+            return float('-inf')
+    
     def estimate_hyperparameters(self, x: torch.Tensor, y: torch.Tensor, K: int = 1000) -> Tuple[float, float, float]:
         """
-        Estimate initial hyperparameters for Matern kernel based on data characteristics.
+        Estimate reasonable initial hyperparameters based on data characteristics.
+        
+        For the Matérn kernel:
+        - lengthscale: Use median distance between randomly selected points
+        - variance: Set to variance of target values
+        - noise_var: Set to a small fraction of target variance
+        - nu is kept at initialization value
         
         Args:
             x: Input features tensor of shape (n, d)
             y: Target values tensor of shape (n,)
-            K: Sample size for estimation (default: 1000)
-        
+            K: Number of random points to sample for lengthscale estimation
+            
         Returns:
-            Tuple containing:
-                - lengthscale: Estimated length scale
-                - variance: Estimated signal variance
-                - noise_var: Estimated noise variance (10% of y variance)
+            Tuple of (lengthscale, variance, noise_var)
         """
-        # Get a random sample of x of size K
-        if x.shape[0] > K:
-            random_indices = torch.randperm(x.shape[0])[:K]
-            x_sample = x[random_indices]
-            y_sample = y[random_indices]
+        # Ensure x is 2D
+        if x.ndim == 1:
+            x = x.unsqueeze(-1)
+            
+        n, d = x.shape
+        
+        # Compute target variance for signal variance estimate
+        y_var = torch.var(y).item()
+        
+        # Estimate lengthscale using median distance heuristic
+        if n > K:
+            # Randomly sample K points if dataset is large
+            idx = torch.randperm(n)[:K]
+            x_sample = x[idx]
         else:
             x_sample = x
-            y_sample = y
+            
+        # Compute pairwise distances
+        dists = torch.cdist(x_sample, x_sample)
         
-        # Calculate pairwise distances between all points in x_sample
-        pairwise_distances = torch.cdist(x_sample, x_sample)
-
-        # Set diagonal elements to infinity to exclude self-distances
-        mask = torch.eye(x_sample.shape[0], device=x_sample.device).bool()
-        pairwise_distances[mask] = float('inf')
-
-        # Calculate the minimum distance for each point
-        min_distances = torch.min(pairwise_distances, dim=1).values
-
-        # Calculate the median of these minimum distances
-        median_distance = torch.median(min_distances)
-
-        # Estimate lengthscale as half the median distance between nearest neighbors
-        lengthscale = 10* median_distance.item()
-
-        # Calculate the variance of y_sample
-        y_var = torch.var(y_sample).item()
-
-        # Estimate signal variance as 90% of y variance
-        signal_var = 0.9 * y_var
+        # Compute median of non-zero distances
+        mask = dists > 0
+        if mask.sum() > 0:
+            median_dist = torch.median(dists[mask]).item()
+        else:
+            # Fallback if all distances are zero
+            median_dist = 1.0
+            
+        # Set lengthscale to median distance
+        lengthscale = median_dist
         
-        # Estimate noise variance as 10% of y variance
-        noise_var = 0.1 * y_var
+        # Set variance to target variance
+        variance = y_var
         
-        return lengthscale, signal_var, noise_var
-
-
-class Matern32(Matern):
-    """
-    Matérn 3/2 kernel, a specific case of the Matérn kernel with nu=3/2.
-    """
-    name: str = Field("matern32", frozen=True)
-    
-    def __init__(self, dimension: int, lengthscale: float, variance: float = 1.0):
-        super().__init__(dimension=dimension, name="matern32", lengthscale=lengthscale, variance=variance)
-
-
-class Matern52(Matern):
-    """
-    Matérn 5/2 kernel, a specific case of the Matérn kernel with nu=5/2.
-    """
-    name: str = Field("matern52", frozen=True)
-    
-    def __init__(self, dimension: int, lengthscale: float, variance: float = 1.0):
-        super().__init__(dimension=dimension, name="matern52", lengthscale=lengthscale, variance=variance)
+        # Set noise variance to small fraction of target variance
+        noise_var = 0.01 * y_var
+        
+        return lengthscale, variance, noise_var

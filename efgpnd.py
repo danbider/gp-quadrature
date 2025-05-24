@@ -222,6 +222,20 @@ def efgpnd_gradient_batched(
 ### Main class for the EFGPND model ###
 # Example usage:
 # model = EFGPND(x, y, "SquaredExponential", EPSILON)
+
+""" 
+Some structural notes:
+
+NUFFT class: 
+- Type 1 and and Type 2 methods
+- For all applies F* or F 
+
+ToeplitzND class:
+- For applying F*F
+
+
+
+"""
 class EFGPND(nn.Module):
     """
     Equispaced‑Fourier Gaussian Process (EFGP) regression in d dimensions.
@@ -289,59 +303,39 @@ class EFGPND(nn.Module):
         if isinstance(kernel, str):
             # Import kernel classes here to avoid circular imports
             from kernels.squared_exponential import SquaredExponential
-            from kernels.matern import Matern32, Matern52
+            from kernels.matern import Matern
             
             # Create kernel object based on string name
             kernel_name = kernel.lower()
             if kernel_name in ["squaredexponential", "se"]:
-                kernel = SquaredExponential(dimension=dimension, lengthscale=1.0)
+                kernel = SquaredExponential(dimension=dimension)
             elif kernel_name == "matern32":
-                kernel = Matern32(dimension=dimension, lengthscale=1.0)
+                kernel = Matern(dimension=dimension, init_nu=1.5)
             elif kernel_name == "matern52":
-                kernel = Matern52(dimension=dimension, lengthscale=1.0)
+                kernel = Matern(dimension=dimension, init_nu=2.5)
+            elif kernel_name == "matern12":
+                kernel = Matern(dimension=dimension, init_nu=0.5)
             else:
                 raise ValueError(f"Unknown kernel type: {kernel}")
         
         self.kernel = kernel
         
         # Estimate optimal hyperparameters if passed a string
-        # TODO this doesn't need to be great but probably need to see how this works on different datasets.
         if estimate_params:
             try:
-                # Compute pairwise distances to estimate lengthscale
-                import numpy as np
-                from scipy.spatial.distance import pdist
+                # Use the kernel's own hyperparameter estimation method
+                estimated_lengthscale, estimated_variance, estimated_noise_var = kernel.estimate_hyperparameters(x, y)
                 
-                # Subsample data if needed
-                x_np = x.detach().cpu().numpy()
-                if len(x) > 500:
-                    indices = np.random.choice(len(x), 500, replace=False)
-                    x_np = x_np[indices]
-                
-                # Compute median distance
-                if x_np.ndim > 1 and x_np.shape[1] > 1:
-                    # Multi-dimensional data
-                    median_dist = np.median(pdist(x_np))
-                else:
-                    # 1D data
-                    median_dist = np.median(pdist(x_np.reshape(-1, 1)))
-                
-                # Set lengthscale to median distance / 2
-                lengthscale = median_dist / 2.0
-                
-                # Adjust for Matern kernels
-                if hasattr(kernel, 'name') and 'matern' in kernel.name.lower():
-                    lengthscale *= 1.5
-                    
-                # Set kernel lengthscale
+                # Set the estimated hyperparameters
                 if hasattr(kernel, 'set_hyper'):
-                    kernel.set_hyper('lengthscale', lengthscale)
-                elif hasattr(kernel, 'lengthscale'):
-                    kernel.lengthscale = lengthscale
+                    kernel.set_hyper('lengthscale', estimated_lengthscale)
+                    kernel.set_hyper('variance', estimated_variance)
+                else:
+                    print(f"Warning: Could not set hyperparameters on kernel of type {type(kernel)}")
                     
-                # Estimate noise variance (10% of data variance)
+                # Use estimated noise variance if not provided
                 if sigmasq is None:
-                    sigmasq = 0.1 * y.var().item()
+                    sigmasq = estimated_noise_var
                     
             except Exception as e:
                 print(f"Warning: Failed to estimate hyperparameters: {e}")
@@ -1379,6 +1373,8 @@ def setup_nufft(x, xcen, h, nufft_eps, cdtype):
     
     return nufft_op.phi, finufft1, finufft2
 
+
+## We use really similar operators (eg toeplitz applies) all over, so I put them here to organize.
 def create_Gv(ws, toeplitz, cdtype):
     """Create just the Gv operator function."""
     ns_shape = tuple(toeplitz.ns)
@@ -1471,7 +1467,7 @@ def nufft_var_est_nd(est_sums, h_val, x_center, pts, eps_val):
     cdtype = _cmplx(pts.dtype)
     nufft_op = NUFFT(pts, x_center, h_val, eps=eps_val, cdtype=cdtype)
     
-    # Special case: we need modeord=True for this operation
+    # special case: don't use the NUFFT class because we need modeord=True 
     return pff.finufft_type2(nufft_op.phi, est_sums, eps=eps_val, isign=+1, modeord=True).real
 
 
