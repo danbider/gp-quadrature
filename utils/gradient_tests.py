@@ -98,16 +98,46 @@ def squared_exponential_kernel(x1, x2, lengthscale, variance):
     K = variance * torch.exp(-0.5 * dist_sq / (lengthscale ** 2))
     return K
 
+def matern_kernel(x1, x2, lengthscale, variance, nu=1.5):
+    # Ensure inputs are 2D
+    if x1.dim() == 1:
+        x1 = x1.unsqueeze(1)
+    if x2.dim() == 1:
+        x2 = x2.unsqueeze(1)
+    
+    # Compute pairwise distances
+    diff = x1.unsqueeze(1) - x2.unsqueeze(0)   # shape: (n1, n2, d)
+    dist = torch.sqrt((diff ** 2).sum(dim=2))   # shape: (n1, n2)
+    scaled_dist = math.sqrt(2 * nu) * dist / lengthscale
+    
+    if nu == 1.5:
+        # Matern 3/2
+        poly_term = 1.0 + scaled_dist
+        K = variance * poly_term * torch.exp(-scaled_dist)
+    elif nu == 2.5:
+        # Matern 5/2
+        poly_term = 1.0 + scaled_dist + (scaled_dist ** 2) / 3.0
+        K = variance * poly_term * torch.exp(-scaled_dist)
+    else:
+        raise ValueError("Only nu=1.5 (Matern 3/2) and nu=2.5 (Matern 5/2) are implemented")
+    
+    return K
+
 # -------------------------
 # 4. Define the negative log marginal likelihood (NLL)
-def negative_log_marginal_likelihood(x, y, lengthscale, variance, noise):
+def negative_log_marginal_likelihood(x, y, lengthscale, variance, noise, kernel_type):
     if x.dim() == 1:
         x = x.unsqueeze(1)
     if y.dim() == 1:
         y = y.unsqueeze(1)
     n = x.shape[0]
     # Compute kernel matrix K(X,X) and add noise on the diagonal.
-    K = squared_exponential_kernel(x, x, lengthscale, variance) + noise * torch.eye(n, dtype=x.dtype)
+    if kernel_type == "squared_exponential":
+        K = squared_exponential_kernel(x, x, lengthscale, variance) + noise * torch.eye(n, dtype=x.dtype)
+    elif kernel_type == "matern":
+        K = matern_kernel(x, x, lengthscale, variance) + noise * torch.eye(n, dtype=x.dtype)
+    else:
+        raise ValueError(f"Unsupported kernel type: {kernel_type}")
     # Compute Cholesky factorization of K.
     L = torch.linalg.cholesky(K)
     # Solve for alpha = K^{-1} y using the Cholesky factors.
@@ -117,7 +147,7 @@ def negative_log_marginal_likelihood(x, y, lengthscale, variance, noise):
     # NLL = 0.5 * y^T K^{-1} y + 0.5 * log|K| + 0.5*n*log(2π)
     nll = 0.5 * torch.matmul(y.T, alpha) + 0.5 * logdetK + 0.5 * n * math.log(2 * math.pi)
     return nll.squeeze()  # return a scalar
-def compute_gradients_vanilla(x, y, sigmasq, kernel):
+def compute_gradients_vanilla(x, y, sigmasq, kernel,kernel_type):
     if x.ndim == 1:
         x = x.unsqueeze(-1)
     if y.ndim == 1:
@@ -135,7 +165,7 @@ def compute_gradients_vanilla(x, y, sigmasq, kernel):
 
     # -------------------------
     # 5. Compute the NLL and its gradients.
-    nll = negative_log_marginal_likelihood(x, y, lengthscale, variance, noise)
+    nll = negative_log_marginal_likelihood(x, y, lengthscale, variance, noise,kernel_type)
     # print("Negative log marginal likelihood:", nll.item())
 
     nll.backward()
