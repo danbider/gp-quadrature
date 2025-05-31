@@ -310,11 +310,11 @@ class EFGPND(nn.Module):
             if kernel_name in ["squaredexponential", "se"]:
                 kernel = SquaredExponential(dimension=dimension)
             elif kernel_name == "matern32":
-                kernel = Matern(dimension=dimension, init_nu=1.5)
+                kernel = Matern(dimension=dimension, nu=1.5)
             elif kernel_name == "matern52":
-                kernel = Matern(dimension=dimension, init_nu=2.5)
+                kernel = Matern(dimension=dimension, nu=2.5)
             elif kernel_name == "matern12":
-                kernel = Matern(dimension=dimension, init_nu=0.5)
+                kernel = Matern(dimension=dimension, nu=0.5)
             else:
                 raise ValueError(f"Unknown kernel type: {kernel}")
         

@@ -211,7 +211,7 @@ class SquaredExponential(Kernel):
         variance = y_var
         
         # Set noise variance to small fraction of target variance
-        noise_var = 0.01 * y_var
+        noise_var = 0.2 * y_var
         
         return lengthscale, variance, noise_var
     
