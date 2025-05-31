@@ -38,13 +38,6 @@ def train_gp_model(x, y, kernel, sigmasq=5, epsilon=1e-4, max_iters=50):
     """Train a GP model with the given kernel."""
     print(f"Training GP model with {type(kernel).__name__} kernel")
     
-    # Calculate data bounds for initializing lengthscale
-    x0 = x.min(dim=0).values
-    x1 = x.max(dim=0).values
-    
-    # Update kernel lengthscale
-    kernel.lengthscale = 1
-    
     # Create and fit the model
     model = EFGPND(
         x=x,
@@ -59,29 +52,24 @@ def train_gp_model(x, y, kernel, sigmasq=5, epsilon=1e-4, max_iters=50):
     
     # Use the Adam optimizer with internal GPParams for enhanced training
     model.optimize_hyperparameters(
-        epsilon_values=[epsilon],
-        trace_samples_values=[10],
         optimizer='Adam',  # Use Adam optimizer directly by passing a string
         max_iters=max_iters,
-        x0=x0, x1=x1
+        trace_samples=10
     )
     
     end_time = time.time()
     total_time = end_time - start_time
     
-    # Fit the model
-    model.fit()
-    
     # Extract hyperparameter trajectory from the training log
     trajectory = {}
-    if hasattr(model, 'training_log') and len(model.training_log) > 0:
-        log = model.training_log[0]  # Get the first log entry
+    if hasattr(model, 'training_log'):
+        log = model.training_log
         trajectory = {
-            'lengthscale': log.get('tracked_lengthscale', []),
-            'variance': log.get('tracked_variance', []),
-            'sigmasq': log.get('tracked_noise', []),
-            'total_time': total_time,
-            'iteration_params': log.get('tracked_hyperparameters', {})
+            'lengthscale': log.get('lengthscale', []),
+            'variance': log.get('variance', []),
+            'sigmasq': log.get('sigmasq', []),
+            'log_marginal': log.get('log_marginal', []),
+            'gradients': log.get('gradients', [])
         }
     
     return model, trajectory
@@ -268,12 +256,12 @@ def compute_loss_landscape(x, y, kernel_class, kernel_name, epsilon=1e-2, fixed_
                 if kernel_class == Matern:
                     # For Matern kernel, additional name parameter is needed
                     kernel = kernel_class(dimension=dimension, name=kernel_name, 
-                                        lengthscale=float(lengthscale_grid[i, j]), 
-                                        variance=float(variance_grid[i, j]))
+                                        init_lengthscale=float(lengthscale_grid[i, j]), 
+                                        init_variance=float(variance_grid[i, j]))
                 else:
                     kernel = kernel_class(dimension=dimension, 
-                                        lengthscale=float(lengthscale_grid[i, j]), 
-                                        variance=float(variance_grid[i, j]))
+                                        init_lengthscale=float(lengthscale_grid[i, j]), 
+                                        init_variance=float(variance_grid[i, j]))
                 
                 # Use the kernel's log_marginal method to compute negative log marginal likelihood
                 with torch.no_grad():
@@ -436,7 +424,7 @@ def train_models_with_epsilons(x, y, kernel_class, kernel_name=None, epsilon_val
     list of (model, trajectory) tuples
     """
     if epsilon_values is None:
-        epsilon_values = [1e-2, 1e-3, 1e-4]
+        epsilon_values = [1e-3]
     
     results = []
     
@@ -444,9 +432,9 @@ def train_models_with_epsilons(x, y, kernel_class, kernel_name=None, epsilon_val
         print(f"\nTraining with epsilon={eps}")
         
         if kernel_class == Matern:
-            kernel = kernel_class(dimension=x.shape[1], name=kernel_name, lengthscale=1.0, variance=1.0)
+            kernel = kernel_class(dimension=x.shape[1], name=kernel_name, init_lengthscale=1.0, init_variance=1.0)
         else:
-            kernel = kernel_class(dimension=x.shape[1], lengthscale=1.0, variance=1.0)
+            kernel = kernel_class(dimension=x.shape[1], init_lengthscale=1.0, init_variance=1.0)
             
         model, trajectory = train_gp_model(x, y, kernel, sigmasq=sigmasq, epsilon=eps, max_iters=max_iters)
         results.append((model, trajectory, eps))
@@ -477,17 +465,33 @@ def get_combined_grid_ranges(trajectories, padding_factor=1.5, vertical_padding_
     min_var = float('inf')
     max_var = 0
     
+    # Check if trajectories list is empty
+    if not trajectories:
+        # Return default grid if no trajectories
+        default_ls = np.logspace(np.log10(0.1), np.log10(10), 10)
+        default_var = np.logspace(np.log10(0.1), np.log10(10), 10)
+        return default_ls, default_var
+    
     for traj in trajectories:
-        if traj is None:
+        if traj is None or not traj['lengthscale'] or not traj['variance']:
             continue
-        
+            
         ls_values = traj['lengthscale']
         var_values = traj['variance']
         
-        min_ls = min(min_ls, min(ls_values))
-        max_ls = max(max_ls, max(ls_values))
-        min_var = min(min_var, min(var_values))
-        max_var = max(max_var, max(var_values))
+        if ls_values:  # Check if list is not empty
+            min_ls = min(min_ls, min(ls_values))
+            max_ls = max(max_ls, max(ls_values))
+            
+        if var_values:  # Check if list is not empty
+            min_var = min(min_var, min(var_values))
+            max_var = max(max_var, max(var_values))
+    
+    # If no valid values were found, return default grid
+    if min_ls == float('inf') or min_var == float('inf'):
+        default_ls = np.logspace(np.log10(0.1), np.log10(10), 10)
+        default_var = np.logspace(np.log10(0.1), np.log10(10), 10)
+        return default_ls, default_var
     
     # Apply padding
     range_ls = max_ls - min_ls
@@ -508,23 +512,6 @@ def get_combined_grid_ranges(trajectories, padding_factor=1.5, vertical_padding_
 def compute_loss_landscape_for_kernel(x, y, kernel_class, kernel_name, model_results, fixed_sigmasq=1.0):
     """
     Compute a single loss landscape for a kernel type, which is independent of epsilon.
-    
-    Parameters:
-    -----------
-    x, y : torch.Tensor
-        Training data
-    kernel_class : class
-        Kernel class
-    kernel_name : str
-        Name of the kernel for Matern kernels
-    model_results : list of (model, trajectory, epsilon) tuples
-        Models and trajectories for different epsilon values
-    fixed_sigmasq : float
-        Fixed noise variance
-        
-    Returns:
-    --------
-    lengthscale_grid, variance_grid, loss_values
     """
     # Extract trajectories for grid range calculation
     trajectories = [traj for _, traj, _ in model_results]
@@ -536,21 +523,18 @@ def compute_loss_landscape_for_kernel(x, y, kernel_class, kernel_name, model_res
         vertical_padding_factor=2.5
     )
     
-    # Use the noise value from the middle epsilon model (typically the best one)
-    middle_model = model_results[1][0]  # Second element is usually middle epsilon
-    sigmasq_tensor = middle_model.sigmasq
+    # Use the noise value from the first model
+    model = model_results[0][0]
+    sigmasq_tensor = model.sigmasq
     
     print(f"\nComputing loss landscape for {kernel_class.__name__} kernel")
-    print(f"This is computed once and used for all epsilon values")
     
-    # Create grid - using fewer points to make computation faster
-    # Rather than creating a completely new grid, we're using a subset of the existing grid
-    # We'll sample only 10x10 points instead of the full grid
-    lengthscale_subset = lengthscales  # Already reduced to 10 points in get_combined_grid_ranges
-    variance_subset = variances         # Already reduced to 10 points in get_combined_grid_ranges
+    # Create grid
+    lengthscale_subset = np.logspace(np.log10(lengthscales[0]), np.log10(lengthscales[-1]), 20)
+    variance_subset = np.logspace(np.log10(variances[0]), np.log10(variances[-1]), 20)
     
     lengthscale_grid, variance_grid = np.meshgrid(lengthscale_subset, variance_subset)
-    loss_values = np.zeros_like(lengthscale_grid)
+    loss_values = np.zeros_like(lengthscale_grid, dtype=np.float64)
     
     # Calculate loss values
     print(f"Grid size: {len(lengthscale_subset)}x{len(variance_subset)}, evaluating {len(lengthscale_subset)*len(variance_subset)} combinations...")
@@ -569,34 +553,52 @@ def compute_loss_landscape_for_kernel(x, y, kernel_class, kernel_name, model_res
     success_count = 0
     error_count = 0
     
+    # Ensure inputs are double precision once, outside the loop
+    x_double = x.double() if x.dtype != torch.float64 else x
+    y_double = y.double() if y.dtype != torch.float64 else y
+    
     for i in progress_iter:
         for j in range(len(lengthscale_subset)):
             try:
                 # Create kernel with current hyperparameters
                 if kernel_class == Matern:
-                    # For Matern kernel, additional name parameter is needed
-                    kernel = kernel_class(dimension=x.shape[1], name=kernel_name, 
-                                        lengthscale=float(lengthscale_grid[i, j]), 
-                                        variance=float(variance_grid[i, j]))
+                    kernel = kernel_class(
+                        dimension=x.shape[1], 
+                        name=kernel_name,
+                        init_lengthscale=1.0,  # Use default initialization
+                        init_variance=1.0      # Use default initialization
+                    )
                 else:
-                    kernel = kernel_class(dimension=x.shape[1], 
-                                        lengthscale=float(lengthscale_grid[i, j]), 
-                                        variance=float(variance_grid[i, j]))
+                    kernel = kernel_class(
+                        dimension=x.shape[1],
+                        init_lengthscale=1.0,  # Use default initialization
+                        init_variance=1.0      # Use default initialization
+                    )
                 
-                # Use the kernel's log_marginal method to compute negative log marginal likelihood
+                # Set parameters after initialization
+                kernel.lengthscale = torch.tensor(float(lengthscale_grid[i, j]), dtype=torch.float64)
+                kernel.variance = torch.tensor(float(variance_grid[i, j]), dtype=torch.float64)
+                
+                # Compute negative log marginal likelihood
                 with torch.no_grad():
-                    try:
-                        # Negative log marginal likelihood (lower is better)
-                        nlml = -kernel.log_marginal(x, y, sigmasq_tensor.item())
-                        loss_values[i, j] = nlml.item()
-                        success_count += 1
-                    except RuntimeError as e:
-                        # Handle case where kernel matrix is not positive definite
-                        # Assign a high loss value to indicate this is a bad region
-                        loss_values[i, j] = 1e6  # Very high loss value
-                        error_count += 1
+                    nlml = -kernel.log_marginal(x_double, y_double, sigmasq_tensor.item())
+                    loss_values[i, j] = nlml.item()
+                    success_count += 1
+                    
             except Exception as e:
-                loss_values[i, j] = 1e6  # Very high loss value
+                print(f"Error at ls={lengthscale_grid[i, j]:.3f}, var={variance_grid[i, j]:.3f}: {str(e)}")
+                # Use the mean of neighboring valid values if available
+                valid_neighbors = []
+                for di in [-1, 0, 1]:
+                    for dj in [-1, 0, 1]:
+                        if i + di >= 0 and i + di < len(variance_subset) and j + dj >= 0 and j + dj < len(lengthscale_subset):
+                            if loss_values[i + di, j + dj] != 0:  # Only include if already computed
+                                valid_neighbors.append(loss_values[i + di, j + dj])
+                
+                if valid_neighbors:
+                    loss_values[i, j] = np.mean(valid_neighbors)
+                else:
+                    loss_values[i, j] = np.max(loss_values[loss_values > 0]) if np.any(loss_values > 0) else 1e6
                 error_count += 1
     
     print(f"Completed: {success_count} successful evaluations, {error_count} errors")
@@ -632,31 +634,41 @@ def plot_epsilon_subplots(kernel_type, landscape_data, model_results, figsize=(1
     for i in range(len(model_results)):
         axes.append(fig.add_subplot(gs[0, i]))
     
-    # Pre-process loss values once for better contrast
-    median_loss = np.median(loss_values)
+    # Pre-process loss values for better visualization
+    # Remove infinite values and replace with large finite values
+    loss_values[np.isinf(loss_values)] = 1e6
+    loss_values[np.isnan(loss_values)] = 1e6
+    
+    # Cap very high loss values to make visualization more informative
+    median_loss = np.nanmedian(loss_values[loss_values < 1e6])
     loss_values_capped = np.clip(loss_values, None, median_loss * 5)
     
     # Apply normalization for better contrast
-    min_loss = np.min(loss_values_capped)
-    range_loss = np.max(loss_values_capped) - min_loss
-    normalized_loss = (loss_values_capped - min_loss) / range_loss
-    log_loss = np.log1p(normalized_loss * 10)
+    min_loss = np.nanmin(loss_values_capped)
+    max_loss = np.nanmax(loss_values_capped)
+    normalized_loss = (loss_values_capped - min_loss) / (max_loss - min_loss)
+    log_loss = np.log1p(normalized_loss * 10)  # log1p(x) = log(1+x)
     
-    # Find global minimum
-    min_idx = np.unravel_index(np.argmin(loss_values_capped), loss_values_capped.shape)
-    min_ls = ls_grid[min_idx]
-    min_var = var_grid[min_idx]
+    # Find global minimum (excluding infinite/nan values)
+    valid_mask = ~(np.isinf(loss_values) | np.isnan(loss_values))
+    if np.any(valid_mask):
+        min_idx = np.unravel_index(np.nanargmin(loss_values_capped * valid_mask), loss_values_capped.shape)
+        min_ls = ls_grid[min_idx]
+        min_var = var_grid[min_idx]
+    else:
+        min_ls = ls_grid[0, 0]
+        min_var = var_grid[0, 0]
     
     # Create color map
     cmap = plt.cm.RdYlBu_r
-    levels = 15
+    levels = np.linspace(np.nanmin(log_loss), np.nanmax(log_loss), 15)
     
     # Collect handles and labels for the legend
     all_handles = []
     all_labels = []
     
     for i, (ax, (model, trajectory, eps)) in enumerate(zip(axes, model_results)):
-        # Create contour plot using the SAME processed loss values
+        # Create contour plot using the processed loss values
         contour = ax.contourf(
             ls_grid, var_grid, log_loss, 
             levels=levels, cmap=cmap, alpha=0.9
@@ -668,35 +680,49 @@ def plot_epsilon_subplots(kernel_type, landscape_data, model_results, figsize=(1
             levels=6, colors='black', linewidths=0.5, alpha=0.5
         )
         
-        # Add optimization trajectory
+        # Add optimization trajectory if available
         if trajectory and 'lengthscale' in trajectory and 'variance' in trajectory:
             ls_traj = trajectory['lengthscale']
             var_traj = trajectory['variance']
             
-            # Plot trajectory
-            path_line = ax.plot(ls_traj, var_traj, 'lime', linewidth=2, alpha=0.8, zorder=4)[0]
-            if i == 0:  # Only add to legend once
-                all_handles.append(path_line)
-                all_labels.append('Optimization Path')
-            
-            # Mark start and end points
-            start_point = ax.scatter(
-                ls_traj[0], var_traj[0],
-                c='blue', s=80, marker='o', 
-                edgecolors='white', linewidths=1, zorder=6
-            )
-            if i == 0:  # Only add to legend once
-                all_handles.append(start_point)
-                all_labels.append('Start')
-            
-            end_point = ax.scatter(
-                ls_traj[-1], var_traj[-1],
-                c='yellow', s=120, marker='*', 
-                edgecolors='black', linewidths=1, zorder=6
-            )
-            if i == 0:  # Only add to legend once
-                all_handles.append(end_point)
-                all_labels.append('Optimal (End)')
+            if len(ls_traj) > 0 and len(var_traj) > 0:  # Check if trajectories are not empty
+                # Plot trajectory
+                path_line = ax.plot(ls_traj, var_traj, 'lime', linewidth=2, alpha=0.8, zorder=4)[0]
+                if i == 0:  # Only add to legend once
+                    all_handles.append(path_line)
+                    all_labels.append('Optimization Path')
+                
+                # Mark start and end points
+                start_point = ax.scatter(
+                    ls_traj[0], var_traj[0],
+                    c='blue', s=80, marker='o', 
+                    edgecolors='white', linewidths=1, zorder=6
+                )
+                if i == 0:  # Only add to legend once
+                    all_handles.append(start_point)
+                    all_labels.append('Start')
+                
+                end_point = ax.scatter(
+                    ls_traj[-1], var_traj[-1],
+                    c='yellow', s=120, marker='*', 
+                    edgecolors='black', linewidths=1, zorder=6
+                )
+                if i == 0:  # Only add to legend once
+                    all_handles.append(end_point)
+                    all_labels.append('Optimal (End)')
+                
+                # Add log marginal likelihood values if available
+                if 'log_marginal' in trajectory and trajectory['log_marginal']:
+                    log_marginal_values = trajectory['log_marginal']
+                    if len(log_marginal_values) > 0:  # Check if we have values
+                        # Add text showing final log marginal likelihood
+                        ax.text(
+                            0.05, 0.15,
+                            f'Final log ML:\n{log_marginal_values[-1]:.2f}',
+                            transform=ax.transAxes,
+                            bbox=dict(facecolor='white', alpha=0.7, boxstyle='round'),
+                            fontsize=9
+                        )
         
         # Mark the global minimum value on all plots
         min_point = ax.scatter(
@@ -742,13 +768,14 @@ def plot_epsilon_subplots(kernel_type, landscape_data, model_results, figsize=(1
     cbar.set_label('Log NLML (blue=better, red=worse)', fontsize=10, fontweight='bold')
     
     # Add legend to the first subplot
-    axes[0].legend(
-        handles=all_handles, 
-        labels=all_labels, 
-        loc='upper right',
-        fontsize=9,
-        framealpha=0.9
-    )
+    if all_handles:  # Only add legend if we have handles
+        axes[0].legend(
+            handles=all_handles, 
+            labels=all_labels, 
+            loc='upper right',
+            fontsize=9,
+            framealpha=0.9
+        )
     
     # Adjust layout
     plt.tight_layout(rect=[0, 0, 1, 0.95])  # Adjust for the suptitle
@@ -769,7 +796,7 @@ def main():
         x = x.unsqueeze(1)  # Add dimension if 1D
     
     # Define epsilon values to test
-    epsilon_values = [1e-2, 1e-3, 1e-4]
+    epsilon_values = [1e-3]
     
     # Train models with different epsilon values
     print("\nTraining Squared Exponential models with different epsilon values...")
@@ -778,7 +805,7 @@ def main():
         SquaredExponential, None, 
         epsilon_values=epsilon_values,
         sigmasq=5,
-        max_iters=50
+        max_iters=10  # Using 10 iterations
     )
     
     print("\nTraining Matern models with different epsilon values...")
@@ -787,7 +814,7 @@ def main():
         Matern, 'matern32', 
         epsilon_values=epsilon_values,
         sigmasq=5,
-        max_iters=50
+        max_iters=10  # Using 10 iterations
     )
     
     # Compute loss landscapes ONCE for each kernel type
