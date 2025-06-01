@@ -89,6 +89,7 @@ def efgpnd_gradient_batched(
             
             # Create the NUFFT operator
             nufft_op = NUFFT(x, xcen, h, nufft_eps, cdtype=cdtype, device=device)
+            # print(nufft_eps)
             
             # Define the simplified helper functions
             fadj = lambda v: nufft_op.type1(v, out_shape=OUT).reshape(-1)    # F* apply: nonuniform → uniform
@@ -113,7 +114,11 @@ def efgpnd_gradient_batched(
                 torch.zeros_like(rhs),
                 tol=cg_tol, early_stopping=early_stopping
             ).solve()
-            alpha = (y - fwd(ws * beta)) / sigmasq # (\tilde{K} +sigma^2 I)^{-1} y
+            z = fwd(ws * beta)
+            alpha = y.to(dtype=cdtype).clone()
+            alpha.sub_(z)
+            alpha.div_(sigmasq)
+            # alpha = (y - fwd(ws * beta)) / sigmasq # (\tilde{K} +sigma^2 I)^{-1} y
 
         # 5)  Term‑2  (α*D'α, α*α) --------------------------------------------
         with record_function("5_compute_term2"):
@@ -127,8 +132,11 @@ def efgpnd_gradient_batched(
         # 6)  Monte‑Carlo trace (Term‑1) ---------------------------------------
         with record_function("6_monte_carlo_trace"):
             T  = trace_samples
-            Z  = (2 * torch.randint(0, 2, (T, x.shape[0]), device=device,
-                                  dtype=dtype) - 1).to(cmplx) # (T, N)
+            Z = torch.empty((T, N), device=device, dtype=dtype)
+            Z.bernoulli_(0.5)
+            Z.mul_(2).sub_(1)
+            Z = Z.to(dtype=cdtype)
+            # Z = Z.to(cmplx) # (T, N)
             fadjZ = fadj(Z)
             ## Redone 
             fadjZ_flat = fadjZ.reshape(T, -1)              # (T, M)
@@ -1285,30 +1293,38 @@ class NUFFT:
         # If input is batched, handle each batch separately
         if vals.ndim > 1:
             batch_size = vals.shape[0]
-            results = []
-            for i in range(batch_size):
-                batch_result = pff.finufft_type1(
-                    self.phi, vals[i], out_shape,
-                    eps=self.eps, isign=-1, modeord=False
-                )
-                # Ensure correct dtype
-                if batch_result.dtype != self.cdtype:
-                    batch_result = batch_result.to(dtype=self.cdtype)
-                results.append(batch_result.reshape(-1))
-            return torch.stack(results)
         else:
-            # Run the NUFFT operation for non-batched input
-            result = pff.finufft_type1(
-                self.phi, vals, out_shape,
-                eps=self.eps, isign=-1, modeord=False
-            )
+            batch_size = 1
             
-            # Ensure correct dtype
-            if result.dtype != self.cdtype:
-                result = result.to(dtype=self.cdtype)
-                
-            # Return result as is (flattened if needed by caller)
-            return result
+
+        # if vals.ndim > 1:
+        #     batch_size = vals.shape[0]
+        #     results = []
+        #     for i in range(batch_size):
+        #         batch_result = pff.finufft_type1(
+        #             self.phi, vals[i], out_shape,
+        #             eps=self.eps, isign=-1, modeord=False
+        #         )
+        #         # Ensure correct dtype
+        #         if batch_result.dtype != self.cdtype:
+        #             batch_result = batch_result.to(dtype=self.cdtype)
+        #         results.append(batch_result.reshape(-1))
+        #     return torch.stack(results)
+        # else:
+            # Run the NUFFT operation for non-batched input
+        result = pff.finufft_type1(
+            self.phi, vals, out_shape,
+            eps=self.eps, isign=-1, modeord=False
+        )
+        # if batch_size == 1:
+        #     result = result.reshape(-1)
+        
+        # Ensure correct dtype
+        if result.dtype != self.cdtype:
+            result = result.to(dtype=self.cdtype)
+            
+        # Return result as is (flattened if needed by caller)
+        return result
             
     def type2(self, fk, out_shape=None):
         """
@@ -1325,29 +1341,26 @@ class NUFFT:
         fk = fk.to(device=self.device)
         if fk.dtype != self.cdtype:
             fk = fk.to(dtype=self.cdtype)
-        
-        # For batched input, handle each batch separately
-        if fk.ndim > 1 and fk.shape[0] > 1 and out_shape is not None:
+
+        # Batched input: reshape and call pff.finufft_type2 in a vectorized way if possible
+        if fk.ndim > 1 and out_shape is not None:
+            # fk: (B, M), out_shape: (m1, m2, ...)
             batch_size = fk.shape[0]
-            results = []
-            for i in range(batch_size):
-                # Reshape for NUFFT (if needed)
-                batch_fk = fk[i]
-                if batch_fk.ndim == 1:  # Flattened input
-                    batch_fk = batch_fk.reshape(out_shape).contiguous()
-                
-                batch_result = pff.finufft_type2(
-                    self.phi, batch_fk,
-                    eps=self.eps, isign=+1, modeord=False
-                )
-                results.append(batch_result)
-            return torch.stack(results)
+            # Reshape each batch to out_shape, then stack to (B, *out_shape)
+            fk_shaped = fk.reshape(batch_size, *out_shape).contiguous()
+            # pff.finufft_type2 supports batched input: (B, *out_shape)
+            result = pff.finufft_type2(
+                self.phi, fk_shaped,
+                eps=self.eps, isign=+1, modeord=False
+            )
+            # result: (B, N) or (B, ...) depending on implementation
+            return result
         else:
             # Reshape for NUFFT (if needed)
             fk_shaped = fk
             if fk.ndim == 1 and out_shape is not None:  # Flattened input
                 fk_shaped = fk.reshape(out_shape).contiguous()
-                
+            
             # Run the NUFFT operation
             return pff.finufft_type2(
                 self.phi, fk_shaped,
