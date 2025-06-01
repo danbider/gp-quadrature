@@ -114,7 +114,8 @@ def efgpnd_gradient_batched(
                 torch.zeros_like(rhs),
                 tol=cg_tol, early_stopping=early_stopping
             ).solve()
-            z = fwd(ws * beta)
+            beta.mul_(ws)
+            z = fwd(beta)
             alpha = y.to(dtype=cdtype).clone()
             alpha.sub_(z)
             alpha.div_(sigmasq)
@@ -122,7 +123,8 @@ def efgpnd_gradient_batched(
 
         # 5)  Term‑2  (α*D'α, α*α) --------------------------------------------
         with record_function("5_compute_term2"):
-            fadj_alpha = (Fy - toeplitz(ws * beta))/sigmasq # this is faster than fadj(alpha)
+            fadj_alpha = Fy.clone().sub_(toeplitz(beta)).div(sigmasq)
+            # fadj_alpha = (Fy - toeplitz(beta))/sigmasq # this is faster than fadj(alpha)
             term2 = torch.stack((
                 torch.vdot(fadj_alpha, Dprime[:, 0] * fadj_alpha),
                 torch.vdot(fadj_alpha, Dprime[:, 1] * fadj_alpha),
@@ -135,8 +137,8 @@ def efgpnd_gradient_batched(
             Z = torch.empty((T, N), device=device, dtype=dtype)
             Z.bernoulli_(0.5)
             Z.mul_(2).sub_(1)
-            Z = Z.to(dtype=cdtype)
-            # Z = Z.to(cmplx) # (T, N)
+            # Z.normal_().sign_()
+            Z = Z.to(cmplx) # (T, N)
             fadjZ = fadj(Z)
             ## Redone 
             fadjZ_flat = fadjZ.reshape(T, -1)              # (T, M)
@@ -169,7 +171,8 @@ def efgpnd_gradient_batched(
                         .reshape(num_hypers * T, -1)        # (num_hypers*T, M)
 
             # Create a reusable A_apply_batch function instead of defining inline
-            A_apply_batch = lambda B: create_A_mean(ws, toeplitz, sigmasq, cdtype)(B)
+            # A_apply_batch = lambda B: create_A_mean(ws, toeplitz, sigmasq, cdtype)(B)
+            A_apply_batch = create_A_mean(ws, toeplitz, sigmasq, cdtype)
             
         with record_function("7_batch_cg_solve"):
             Beta_all = ConjugateGradients(
@@ -179,10 +182,16 @@ def efgpnd_gradient_batched(
                 
         with record_function("7.5_compute_alpha"):
             #
-            Alpha_all = (R_all - fwd(ws * Beta_all)) / sigmasq
-            A_chunks  = Alpha_all.chunk(num_hypers, 0)
+            Beta_all.mul_(ws)
+            fwdBeta = fwd(Beta_all)
+            R_all.sub_(fwdBeta)
+            R_all.div_(sigmasq)
+            Alpha_batch = R_all.view(num_hypers, T, -1)
+            term1 = (Z.unsqueeze(0) * Alpha_batch).sum(dim=2).mean(1)
+            # Alpha_all = (R_all - fwd(ws * Beta_all)) / sigmasq
+            # A_chunks  = Alpha_all.chunk(num_hypers, 0)
 
-            term1 = torch.stack([(Z * a).sum(1).mean() for a in A_chunks])
+            # term1 = torch.stack([(Z * a).sum(1).mean() for a in A_chunks])
 
         # 7)  Gradient ----------------------------------------------------------
         with record_function("8_gradient_calculation"):
