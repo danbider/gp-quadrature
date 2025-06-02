@@ -16,7 +16,7 @@ from kernels.kernel_params import GPParams
 
 def efgpnd_gradient_batched(
         x, y, sigmasq, kernel, eps, trace_samples, x0, x1,
-        *, nufft_eps=6e-8, cg_tol = 1e-4, early_stopping = True, device=None,
+        *, nufft_eps=6e-8, cg_tol = None, early_stopping = True, device=None,
         do_profiling=False, compute_log_marginal=False,
         log_marginal_probes=100, log_marginal_steps=25):
     """
@@ -35,7 +35,9 @@ def efgpnd_gradient_batched(
         Number of Lanczos steps for log det when computing log marginal likelihood
     """
     num_hypers = kernel.num_hypers
-    
+
+    if cg_tol is None:
+        cg_tol = eps
     # Determine profiler activities
     activities = [ProfilerActivity.CPU]
     if torch.cuda.is_available():
@@ -173,12 +175,17 @@ def efgpnd_gradient_batched(
             # Create a reusable A_apply_batch function instead of defining inline
             # A_apply_batch = lambda B: create_A_mean(ws, toeplitz, sigmasq, cdtype)(B)
             A_apply_batch = create_A_mean(ws, toeplitz, sigmasq, cdtype)
-            
+
         with record_function("7_batch_cg_solve"):
-            Beta_all = ConjugateGradients(
+            M_inv = create_jacobi_precond(ws, sigmasq)
+            cg = ConjugateGradients(
                 A_apply_batch, B_all, torch.zeros_like(B_all),
-                tol=cg_tol, early_stopping=early_stopping
-            ).solve()
+                tol=cg_tol, early_stopping=early_stopping,
+                # M_inv_apply=M_inv
+            )
+            Beta_all = cg.solve()
+            # print(cg.iters_completed)
+
                 
         with record_function("7.5_compute_alpha"):
             #
@@ -494,6 +501,7 @@ class EFGPND(nn.Module):
         trace_samples: int = 10,
         do_profiling: bool = False,
         nufft_eps: Optional[float] = None,
+        cg_tol: Optional[float] = None,
         apply_gradients: bool = True,
         compute_log_marginal: bool = False,
         log_marginal_probes: int = 100,
@@ -551,7 +559,8 @@ class EFGPND(nn.Module):
             'log_marginal_probes': log_marginal_probes, 
             'log_marginal_steps': log_marginal_steps
         }
-        
+        if cg_tol is None:
+            cg_tol = self.eps
         # Compute gradients with respect to the original parameters
         result = efgpnd_gradient_batched(
             self.x, self.y,
@@ -562,6 +571,7 @@ class EFGPND(nn.Module):
             x0=x0, x1=x1,
             do_profiling=do_profiling,
             nufft_eps=nufft_eps,
+            cg_tol=cg_tol,
             **log_marginal_kwargs,
             **kwargs
         )
@@ -1436,6 +1446,7 @@ def create_A_var(ws, toeplitz, sigmasq_scalar, cdtype):
         
     return A_var
 
+
 def setup_operators(ws, toeplitz, sigmasq_scalar, cdtype):
     """Helper function to set up all operator functions (kept for backward compatibility)."""
     Gv = create_Gv(ws, toeplitz, cdtype)
@@ -1443,6 +1454,18 @@ def setup_operators(ws, toeplitz, sigmasq_scalar, cdtype):
     A_var = create_A_var(ws, toeplitz, sigmasq_scalar, cdtype)
     
     return A_mean, A_var, Gv
+def create_jacobi_precond(ws, sigmasq_scalar):
+    """
+    Build M^{-1} for A_mean = D C D + σ^2 I, approximated by diag(ws^2) + σ^2 I.
+    """
+    # ws: (M,)  1D tensor of length = # features
+    # sigmasq_scalar: scalar noise variance
+    diag_elements = ws.pow(2) + sigmasq_scalar
+    # (you might want to clamp diag_elements to be >= epsilon to avoid zeros)
+    def M_inv(v):
+        # v has shape (..., M); we divide elementwise along the last dim
+        return v / diag_elements
+    return M_inv
 
 # for stochastic variance estimation
 def diag_sums_nd(A_apply, J, xis_flat, max_cg_iter, cg_tol, ws):

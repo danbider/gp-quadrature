@@ -1,4 +1,4 @@
-from typing import Tuple, Union
+from typing import Tuple, Union, Optional
 import torch
 from kernels.matern import Matern
 from kernels.squared_exponential import SquaredExponential
@@ -69,7 +69,7 @@ class GetTruncationBound:
         return mid
     
 
-def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, use_integral: bool = False, l2scaled: bool = False, dtype: torch.dtype = torch.float64) -> Tuple[torch.Tensor, float, int]:
+def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, use_integral: bool = False, l2scaled: bool = False, dtype: torch.dtype = torch.float64, trunc_eps: Optional[float] = None) -> Tuple[torch.Tensor, float, int]:
     """
     Return 1D equispaced Fourier quadrature nodes for given tolerance.
 
@@ -88,6 +88,8 @@ def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, u
     
     # spatial radial ker func (TODO: understand this)
     eps_use = eps
+    if trunc_eps is None:
+        trunc_eps = eps
     
     if use_integral:
         truncation_bound = GetTruncationBound(eps, kernel_obj.kernel, dtype=dtype)
@@ -97,7 +99,7 @@ def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, u
         
         # Fourier radial ker func
         khat_modified = lambda r: abs(r**(dim-1)) * kernel_obj.spectral_density(r) / kernel_obj.spectral_density(torch.tensor(0, device='cpu', dtype=dtype))  # polar factor & rel to 0
-        truncation_bound_freq = GetTruncationBound(eps, khat_modified, dtype=dtype)
+        truncation_bound_freq = GetTruncationBound(trunc_eps, khat_modified, dtype=dtype)
         Lfreq = truncation_bound_freq.find_truncation_bound()  # find eps-support
         
         hm = math.ceil(Lfreq / h_spacing)  # half number of nodes to cover [-Lfreq,Lfreq]
