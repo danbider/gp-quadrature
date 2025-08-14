@@ -862,7 +862,57 @@ class EFGPND(nn.Module):
             return ytrg["mean"], ytrg["var"], ytrg["log_marginal"]
         else:
             return ytrg["mean"], ytrg["var"]
-            
+
+    def sample_posterior(
+            self,
+            x_new: torch.Tensor,
+            nsamples: int):
+        """
+        Sample from the GP with learned hyperparameters. Each sample is a function tabulated
+        at x_new.
+
+        Args:
+            x_new: locations to sample GP
+            nsamples: number of samples to draw
+
+        Returns:
+            samples: numpy array of samples
+        """
+        # pull in learned hyperparameters and other constants
+        x = self.x
+        sigmasq = self.sigmasq
+        kernel = self.kernel.kernel
+        n = x.shape[0]
+        nnew = x_new.shape[0]
+
+        # kernel evaluated at distances from observations to new points
+        distances_trgs_obs = torch.cdist(x_new, x, p=2)
+        k_xtrgs_xobs = kernel(distances_trgs_obs)
+
+        # kernel evaluated at distances from observations to observations
+        distances_obs = torch.cdist(x, x, p=2)
+        k_obs_obs = kernel(distances_obs)
+        kpi = sigmasq * torch.eye(n) + k_obs_obs
+
+        # kernel evaluated at distances from new points to new points
+        distances_trgs = torch.cdist(x_new, x_new, p=2)
+        k_xtrgs_xtrgs = kernel(distances_trgs)
+
+        # covariance at target points
+        cov_trgs = k_xtrgs_xtrgs - k_xtrgs_xobs @ torch.linalg.solve(kpi, k_xtrgs_xobs.T)
+        cov_trgs = cov_trgs + 1e-10 * torch.eye(x_new.shape[0], dtype=x_new.dtype,
+                                                device=x_new.device)  # Add small noise for numerical stability
+
+        L = torch.linalg.cholesky(cov_trgs)
+
+        # Draw standard normal samples
+        Z = torch.randn(nnew, nsamples, dtype=self.x.dtype, device=self.x.device)
+
+        # Compute samples
+        mean, _ = self.predict(x_new, return_variance=False)
+        samples = mean.unsqueeze(1) + L @ Z
+        return samples.detach().numpy()
+
     def _compute_log_marginal(self, beta, ws, sigmasq, toeplitz, device, rdtype, n):
         """
         Compute the log marginal likelihood.
