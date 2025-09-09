@@ -76,11 +76,12 @@ def efgpnd_gradient_batched(
         
         # Get frequency grid and weights
         with record_function("1_frequency_grid_setup"):
-            xis_1d, h, mtot = get_xis(kernel_obj=kernel, eps=eps, L=L, use_integral=True, l2scaled=False)
+            xis_1d, h, mtot = get_xis(kernel_obj=kernel, eps=eps, L=L, use_integral=True, l2scaled=False)#,trunc_eps=0.01)
             grids = torch.meshgrid(*(xis_1d for _ in range(d)), indexing='ij') # makes tensor product Jm 
             xis = torch.stack(grids, dim=-1).view(-1, d) 
             ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=cdtype) * h**d) # (mtot**d,1)
             Dprime  = (h**d * kernel.spectral_grad(xis)).to(cmplx)  # (M, 3)
+            # print(xis.shape)
 
         # 1)  NUFFT adjoint / forward helpers (modeord=False) -------------------
         with record_function("2_nufft_setup"):
@@ -177,13 +178,16 @@ def efgpnd_gradient_batched(
             A_apply_batch = create_A_mean(ws, toeplitz, sigmasq, cdtype)
 
         with record_function("7_batch_cg_solve"):
-            M_inv = create_jacobi_precond(ws, sigmasq)
+            # M_inv = create_jacobi_precond(ws, sigmasq)
+            t1 = time.time()
             cg = ConjugateGradients(
                 A_apply_batch, B_all, torch.zeros_like(B_all),
                 tol=cg_tol, early_stopping=early_stopping,
                 # M_inv_apply=M_inv
             )
             Beta_all = cg.solve()
+            t2 = time.time()
+            # print(f"CG Time taken: {t2 - t1} seconds")
             # print(cg.iters_completed)
 
                 
@@ -560,7 +564,7 @@ class EFGPND(nn.Module):
             'log_marginal_steps': log_marginal_steps
         }
         if cg_tol is None:
-            cg_tol = self.eps
+            cg_tol = 0.1*self.eps
         # Compute gradients with respect to the original parameters
         result = efgpnd_gradient_batched(
             self.x, self.y,
@@ -1661,10 +1665,12 @@ def compute_prediction_variance(x_new, xis, ws, A_var, cg_tol, max_cg_iter, vari
         J = hutchinson_probes
         
         # Compute diagonal sums
+        t1 = time.time()
         est_sums = diag_sums_nd(
             A_var, J, xis, max_cg_iter, cg_tol, ws
         )
-        
+        t2 = time.time()
+        print(f"Time to compute diag sums: {t2-t1:.4f} seconds")
         # Compute variance using our NUFFT class wrapper
         pvar = nufft_var_est_nd(
             est_sums, h, xcen, x_new, nufft_eps
