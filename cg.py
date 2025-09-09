@@ -103,6 +103,14 @@ class ConjugateGradients:
             p = z.clone()  # Initial search direction
             r_dot_z = self._inner_product(r, z).real  # Inner product for residual
             r0_norm = torch.sqrt(r_dot_z)  # Initial residual norm
+
+
+            ## fix to not be based on init residual
+            # Baseline norm independent of warm start
+            b_norm = torch.linalg.norm(self.b).real
+            denom = b_norm if b_norm > 0 else torch.tensor(1.0, device=self.device, dtype=self.dtype)
+
+            
             
             # Main CG loop
             for i in range(self.max_iter):
@@ -120,7 +128,8 @@ class ConjugateGradients:
                 r = r - alpha * Ap
                 
                 # Check convergence
-                if self.early_stopping and torch.sqrt(r_dot_z) / (r0_norm + self.div_eps) < self.tol:
+                # if self.early_stopping and torch.sqrt(r_dot_z) / (r0_norm + self.div_eps) < self.tol:
+                if self.early_stopping and torch.linalg.norm(r).real / (denom + self.div_eps) < self.tol:
                     break
                 
                 # Apply preconditioner to new residual
@@ -166,7 +175,17 @@ class ConjugateGradients:
             # Compute initial inner products and norms
             r_dot_z = torch.sum(r.conj() * z, dim=1).real  # (B,)
             r0_norm = torch.sqrt(r_dot_z)  # (B,)
-            
+
+
+            ## fix to not be based on init residual
+            # Baseline norm independent of warm start
+            # b_norm = torch.linalg.norm(self.b).real
+            # denom = b_norm if b_norm > 0 else torch.tensor(1.0, device=self.device, dtype=self.dtype)
+            # Row-wise rhs norms (B,)
+            b_norm = torch.linalg.norm(self.b, dim=1).real                # (B,)
+            denom  = torch.where(b_norm > 0, b_norm, torch.ones_like(b_norm))
+
+                        
             # Mask to track which systems are still active
             active = torch.ones(x.shape[0], dtype=torch.bool, device=self.device)
             
@@ -208,7 +227,16 @@ class ConjugateGradients:
                 
                 # Check convergence based on relative residual
                 if self.early_stopping:
-                    converged = (torch.sqrt(r_dot_z_new) / (r0_norm[idx] + self.div_eps)) < self.tol
+                    # converged = (torch.sqrt(r_dot_z_new) / (r0_norm[idx] + self.div_eps)) < self.tol
+
+                    ## new convergence check
+
+                    # converged = torch.linalg.norm(r[idx]).real / (denom + self.div_eps) < self.tol
+                    r_norm   = torch.linalg.norm(r[idx], dim=1).real              # (k,)
+                    rel_res  = r_norm / (denom[idx] + self.div_eps)
+                    converged = (rel_res < self.tol) | (r_norm < 1e-12)           # absolute fallback for tiny rhs
+                    active[idx[converged]] = False
+
                     # Update the mask of active systems
                     active[idx[converged]] = False
             
