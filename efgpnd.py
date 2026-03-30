@@ -18,6 +18,11 @@ def efgpnd_gradient_batched(
         x, y, sigmasq, kernel, eps, trace_samples, x0, x1,
         *, nufft_eps=6e-8, cg_tol = None, early_stopping = True, device=None,
         do_profiling=False, compute_log_marginal=False,
+        noise_floor: Optional[float] = None,
+        stats_out: Optional[Dict[str, float]] = None,
+        mean_cg_init: Optional[torch.Tensor] = None,
+        use_mean_cg_preconditioner: bool = True,
+        use_trace_cg_preconditioner: bool = True,
         log_marginal_probes=100, log_marginal_steps=25):
     """
     Gradient of the N‑D GP log‑marginal likelihood estimated with
@@ -73,6 +78,17 @@ def efgpnd_gradient_batched(
             domain_lengths = x1 - x0
             L = domain_lengths.max()
             N = x.shape[0]
+            if noise_floor is not None:
+                sigmasq_eff = sigmasq.clamp_min(noise_floor)
+            else:
+                sigmasq_eff = sigmasq
+            kernel_hypers = list(getattr(kernel, "hypers", []))
+            variance_idx = kernel_hypers.index("variance") if "variance" in kernel_hypers else None
+            kernel_hyper_count = num_hypers - 1
+            trace_kernel_indices = [
+                i for i in range(kernel_hyper_count)
+                if i != variance_idx
+            ]
         
         # Get frequency grid and weights
         with record_function("1_frequency_grid_setup"):
@@ -105,100 +121,139 @@ def efgpnd_gradient_batched(
             toeplitz = ToeplitzND(v_kernel, force_pow2=True)               # cached once
 
             # 3)  Linear map A· = D F*F (D·) + σ² I -------------------------------
-            A_apply = create_A_mean(ws, toeplitz, sigmasq, cdtype)
+            A_apply = create_A_mean(ws, toeplitz, sigmasq_eff, cdtype)
+            center = tuple(((torch.tensor(v_kernel.shape, device=device) - 1) // 2).tolist())
+            diag_scale = v_kernel[center].real
+            jacobi_M_inv = create_jacobi_precond(ws, sigmasq_eff, diag_scale=diag_scale)
+            mean_M_inv = jacobi_M_inv if use_mean_cg_preconditioner else None
+            trace_M_inv = jacobi_M_inv if use_trace_cg_preconditioner else None
 
         # 4)  Solve A β = W F* y ---------------------------------------------
         with record_function("4_solve_cg"):
             Fy = fadj(y).reshape(-1)
 
             rhs   = ws * Fy
-            beta = ConjugateGradients(
+            if mean_cg_init is not None and mean_cg_init.shape == rhs.shape:
+                mean_x0 = mean_cg_init.to(device=device, dtype=cdtype).clone()
+            else:
+                mean_x0 = torch.zeros_like(rhs)
+            cg_mean = ConjugateGradients(
                 A_apply, rhs,
-                torch.zeros_like(rhs),
-                tol=cg_tol, early_stopping=early_stopping
-            ).solve()
+                mean_x0,
+                tol=cg_tol, early_stopping=early_stopping,
+                M_inv_apply=mean_M_inv
+            )
+            beta = cg_mean.solve()
+            beta_raw = beta.detach().clone()
             beta.mul_(ws)
             z = fwd(beta)
             alpha = y.to(dtype=cdtype).clone()
             alpha.sub_(z)
-            alpha.div_(sigmasq)
+            alpha.div_(sigmasq_eff)
             # alpha = (y - fwd(ws * beta)) / sigmasq # (\tilde{K} +sigma^2 I)^{-1} y
 
         # 5)  Term‑2  (α*D'α, α*α) --------------------------------------------
         with record_function("5_compute_term2"):
-            fadj_alpha = Fy.clone().sub_(toeplitz(beta)).div(sigmasq)
+            fadj_alpha = Fy.clone().sub_(toeplitz(beta)).div(sigmasq_eff)
             # fadj_alpha = (Fy - toeplitz(beta))/sigmasq # this is faster than fadj(alpha)
-            term2 = torch.stack((
-                torch.vdot(fadj_alpha, Dprime[:, 0] * fadj_alpha),
-                torch.vdot(fadj_alpha, Dprime[:, 1] * fadj_alpha),
-                torch.vdot(alpha,       alpha)
-            ))
+            term2_kernel = torch.stack([
+                torch.vdot(fadj_alpha, Dprime[:, i] * fadj_alpha).real
+                for i in range(kernel_hyper_count)
+            ])
+            alpha_norm = torch.vdot(alpha, alpha).real
+            if variance_idx is not None:
+                variance_scalar = torch.as_tensor(
+                    kernel.get_hyper("variance"),
+                    device=device,
+                    dtype=rdtype,
+                )
+                y_alpha = torch.vdot(y.to(dtype=cdtype), alpha).real
+                term2_kernel[variance_idx] = (y_alpha - sigmasq_eff * alpha_norm) / variance_scalar
+            term2 = torch.cat((term2_kernel, alpha_norm.unsqueeze(0)))
 
         # 6)  Monte‑Carlo trace (Term‑1) ---------------------------------------
         with record_function("6_monte_carlo_trace"):
             T  = trace_samples
-            Z = torch.empty((T, N), device=device, dtype=dtype)
-            Z.bernoulli_(0.5)
-            Z.mul_(2).sub_(1)
-            # Z.normal_().sign_()
-            Z = Z.to(cmplx) # (T, N)
-            fadjZ = fadj(Z)
-            ## Redone 
-            fadjZ_flat = fadjZ.reshape(T, -1)              # (T, M)
-            Hk = num_hypers -1
-            # stack: (Hk, T, M)  ->  (Hk*T, M)
-            Di_FZ_all  = torch.stack(
-                [Dprime[:, i] * fadjZ_flat for i in range(Hk)],
-                dim=0
-            ).reshape(-1, fadjZ_flat.shape[-1])            # ((Hk*T), M)
-
-            # one batched NUFFT‑2 for every rhs_i
-            rhs_all_kernel = fwd(Di_FZ_all).reshape(Hk, T, -1)      # (Hk, T, N)
-
-            # Toeplitz for B_i
-            B_all_kernel   = ws * toeplitz(Di_FZ_all).reshape(Hk, T, -1)  # (Hk, T, M)
+            trace_kernel_count = len(trace_kernel_indices)
+            if trace_kernel_count > 0:
+                Z = torch.empty((T, N), device=device, dtype=dtype)
+                Z.bernoulli_(0.5)
+                Z.mul_(2).sub_(1)
+                Z = Z.to(cmplx)
+                fadjZ = fadj(Z)
+                fadjZ_flat = fadjZ.reshape(T, -1)
+                Di_FZ_all = torch.stack(
+                    [Dprime[:, i] * fadjZ_flat for i in trace_kernel_indices],
+                    dim=0
+                ).reshape(-1, fadjZ_flat.shape[-1])
+                rhs_all_kernel = fwd(Di_FZ_all).reshape(trace_kernel_count, T, -1)
+                B_all_kernel = ws * toeplitz(Di_FZ_all).reshape(trace_kernel_count, T, -1)
+            else:
+                B_all_kernel = torch.empty((0, T, ws.numel()), device=device, dtype=cmplx)
+                rhs_all_kernel = torch.empty((0, T, N), device=device, dtype=cmplx)
 
             # ------------------------------------------------------------------
             #  add the noise‑variance block (hyper‑parameter index == Hk)
+            #  using tr(K^{-1}) = n/σ² - σ⁻² tr(A_mean^{-1} G)
             # ------------------------------------------------------------------
-            rhs_noise = Z                                   # (T, N)
-            B_noise   = ws * fadjZ_flat                     # (T, M)
-
-            # ------------------------------------------------------------------
-            #  concatenate into the shapes expected downstream
-            # ------------------------------------------------------------------
-            R_all = torch.cat((rhs_all_kernel, rhs_noise.unsqueeze(0)), dim=0) \
-                        .reshape(num_hypers * T, -1)        # (num_hypers*T, N)
+            V = torch.empty((T, ws.numel()), device=device, dtype=dtype)
+            V.bernoulli_(0.5)
+            V.mul_(2).sub_(1)
+            V = V.to(cmplx)
+            B_noise = ws * toeplitz(ws * V).reshape(T, -1)
 
             B_all = torch.cat((B_all_kernel,  B_noise.unsqueeze(0)), dim=0) \
-                        .reshape(num_hypers * T, -1)        # (num_hypers*T, M)
+                        .reshape((trace_kernel_count + 1) * T, -1)
 
             # Create a reusable A_apply_batch function instead of defining inline
             # A_apply_batch = lambda B: create_A_mean(ws, toeplitz, sigmasq, cdtype)(B)
-            A_apply_batch = create_A_mean(ws, toeplitz, sigmasq, cdtype)
+            A_apply_batch = create_A_mean(ws, toeplitz, sigmasq_eff, cdtype)
 
         with record_function("7_batch_cg_solve"):
             # M_inv = create_jacobi_precond(ws, sigmasq)
             t1 = time.time()
-            cg = ConjugateGradients(
+            cg_trace = ConjugateGradients(
                 A_apply_batch, B_all, torch.zeros_like(B_all),
                 tol=cg_tol, early_stopping=early_stopping,
-                # M_inv_apply=M_inv
+                M_inv_apply=trace_M_inv
             )
-            Beta_all = cg.solve()
+            Beta_all = cg_trace.solve()
             t2 = time.time()
             # print(f"CG Time taken: {t2 - t1} seconds")
             # print(cg.iters_completed)
 
                 
         with record_function("7.5_compute_alpha"):
-            #
-            Beta_all.mul_(ws)
-            fwdBeta = fwd(Beta_all)
-            R_all.sub_(fwdBeta)
-            R_all.div_(sigmasq)
-            Alpha_batch = R_all.view(num_hypers, T, -1)
-            term1 = (Z.unsqueeze(0) * Alpha_batch).sum(dim=2).mean(1)
+            kernel_rows = trace_kernel_count * T
+            Beta_kernel = Beta_all[:kernel_rows]
+            Beta_noise = Beta_all[kernel_rows:]
+
+            term1 = torch.empty(num_hypers, device=device, dtype=rdtype)
+            if trace_kernel_count > 0:
+                Beta_kernel.mul_(ws)
+                fwdBeta = fwd(Beta_kernel)
+                R_all_kernel = rhs_all_kernel.reshape(kernel_rows, -1).clone()
+                R_all_kernel.sub_(fwdBeta)
+                R_all_kernel.div_(sigmasq_eff)
+                Alpha_batch = R_all_kernel.view(trace_kernel_count, T, -1)
+                term1_kernel = (Z.unsqueeze(0) * Alpha_batch).sum(dim=2).mean(1).real
+                for slot, kernel_idx in enumerate(trace_kernel_indices):
+                    term1[kernel_idx] = term1_kernel[slot]
+
+            term1_noise = (
+                torch.as_tensor(N, device=device, dtype=rdtype) / sigmasq_eff
+                - ((V.conj() * Beta_noise).sum(dim=1).real / sigmasq_eff).mean()
+            )
+            if variance_idx is not None:
+                variance_scalar = torch.as_tensor(
+                    kernel.get_hyper("variance"),
+                    device=device,
+                    dtype=rdtype,
+                )
+                term1[variance_idx] = (
+                    torch.as_tensor(N, device=device, dtype=rdtype) - sigmasq_eff * term1_noise
+                ) / variance_scalar
+            term1[-1] = term1_noise
             # Alpha_all = (R_all - fwd(ws * Beta_all)) / sigmasq
             # A_chunks  = Alpha_all.chunk(num_hypers, 0)
 
@@ -207,12 +262,26 @@ def efgpnd_gradient_batched(
         # 7)  Gradient ----------------------------------------------------------
         with record_function("8_gradient_calculation"):
             grad = 0.5 * (term1 - term2)
+
+        if stats_out is not None:
+            stats_out.update({
+                "mean_cg_iters": int(cg_mean.iters_completed),
+                "trace_cg_iters": int(cg_trace.iters_completed),
+                "trace_num_rhs": int(B_all.shape[0]),
+                "feature_count": int(ws.numel()),
+                "mtot": int(mtot),
+                "trace_samples": int(T),
+                "mean_cg_warm_start_used": bool(mean_cg_init is not None and mean_cg_init.shape == rhs.shape),
+                "mean_cg_preconditioned": bool(use_mean_cg_preconditioner),
+                "trace_cg_preconditioned": bool(use_trace_cg_preconditioner),
+            })
+            stats_out["mean_beta"] = beta_raw
     
         with record_function("9_log_marginal_likelihood"):
             log_marginal = None
             if compute_log_marginal:
                 # Use the log_marginal_probes and log_marginal_steps parameters
-                det_term = logdet_slq(ws, sigmasq, toeplitz,
+                det_term = logdet_slq(ws, sigmasq_eff, toeplitz,
                         probes=log_marginal_probes,
                         steps=log_marginal_steps,
                         dtype=rdtype, device=device, n=N)
@@ -395,6 +464,8 @@ class EFGPND(nn.Module):
         self._fitted = False
         self._cached_params = {} # For tracking hyperparameter changes
         self._registered_optimizers = []
+        self.last_gradient_stats = {}
+        self._last_gradient_beta = None
         
         # Update parameter cache
         self._update_param_cache()
@@ -506,6 +577,7 @@ class EFGPND(nn.Module):
         do_profiling: bool = False,
         nufft_eps: Optional[float] = None,
         cg_tol: Optional[float] = None,
+        noise_floor: Optional[float] = None,
         apply_gradients: bool = True,
         compute_log_marginal: bool = False,
         log_marginal_probes: int = 100,
@@ -527,6 +599,9 @@ class EFGPND(nn.Module):
             Whether to profile the gradient computation
         nufft_eps : Optional[float]
             NUFFT accuracy (defaults to self.eps * 0.1)
+        noise_floor : Optional[float]
+            Optional computational floor applied to sigmasq inside the gradient
+            solves. If provided, the gradient path uses max(sigmasq, noise_floor).
         apply_gradients : bool
             If True, automatically apply gradients to model parameters (self._gp_params.raw)
         compute_log_marginal : bool
@@ -546,6 +621,12 @@ class EFGPND(nn.Module):
         If compute_log_marginal=True:
             (grads, log_marginal) : Tuple[torch.Tensor, torch.Tensor]
                 Gradients and log marginal likelihood value
+
+        Notes
+        -----
+        After each call, `self.last_gradient_stats` is updated with lightweight
+        CG diagnostics for the current gradient evaluation, including
+        `mean_cg_iters` and `trace_cg_iters`.
         """
         # Ensure cache is updated
         self._update_param_cache()
@@ -553,6 +634,11 @@ class EFGPND(nn.Module):
         # Set default nufft_eps if not provided
         if nufft_eps is None:
             nufft_eps = self.eps * 0.1
+        if noise_floor is None:
+            noise_floor = self.opts.get("noise_floor")
+        use_mean_cg_warm_start = self.opts.get("mean_cg_warm_start", True)
+        use_mean_cg_preconditioner = self.opts.get("mean_cg_preconditioner", True)
+        use_trace_cg_preconditioner = self.opts.get("trace_cg_preconditioner", True)
         
         # Calculate data bounds for gradient computation
         x0 = self.x.min(dim=0).values
@@ -565,6 +651,7 @@ class EFGPND(nn.Module):
         }
         if cg_tol is None:
             cg_tol = 0.1*self.eps
+        gradient_stats = {}
         # Compute gradients with respect to the original parameters
         result = efgpnd_gradient_batched(
             self.x, self.y,
@@ -576,9 +663,16 @@ class EFGPND(nn.Module):
             do_profiling=do_profiling,
             nufft_eps=nufft_eps,
             cg_tol=cg_tol,
+            noise_floor=noise_floor,
+            stats_out=gradient_stats,
+            mean_cg_init=self._last_gradient_beta if use_mean_cg_warm_start else None,
+            use_mean_cg_preconditioner=use_mean_cg_preconditioner,
+            use_trace_cg_preconditioner=use_trace_cg_preconditioner,
             **log_marginal_kwargs,
             **kwargs
         )
+        self._last_gradient_beta = gradient_stats.pop("mean_beta", None)
+        self.last_gradient_stats = gradient_stats
         
         # Extract results based on what was returned
         if compute_log_marginal:
@@ -698,15 +792,25 @@ class EFGPND(nn.Module):
         
         # Create A_mean operator directly using the new function
         A_mean = create_A_mean(ws, toeplitz, sigmasq_scalar, cdtype)
+        center = tuple(((torch.tensor(v_kernel.shape, device=device) - 1) // 2).tolist())
+        diag_scale = v_kernel[center].real
+        mean_M_inv = None
+        if self.opts.get("mean_cg_preconditioner", True):
+            mean_M_inv = create_jacobi_precond(ws, sigmasq_scalar, diag_scale=diag_scale)
     
         # Solve CG system for mean
         cg_tol = self.opts.get("cg_tolerance", 1e-4)
+        if self.opts.get("mean_cg_warm_start", True) and self._beta is not None and self._beta.shape == right_hand_side.shape:
+            beta_x0 = self._beta.to(device=device, dtype=cdtype).clone()
+        else:
+            beta_x0 = torch.zeros_like(right_hand_side, dtype=cdtype)
         beta = ConjugateGradients(
             A_mean, 
             right_hand_side, 
-            x0=torch.zeros_like(right_hand_side, dtype=cdtype),
+            x0=beta_x0,
             tol=cg_tol,
-            early_stopping=True
+            early_stopping=True,
+            M_inv_apply=mean_M_inv
         ).solve()
         
         # Cache results for future predictions
@@ -1014,7 +1118,9 @@ class EFGPND(nn.Module):
         # Track hyperparameters
         history = {
             'log_marginal': [],
-            'gradients': []
+            'gradients': [],
+            'mean_cg_iters': [],
+            'trace_cg_iters': [],
         }
         
         # Store initial hyperparameters
@@ -1068,6 +1174,8 @@ class EFGPND(nn.Module):
             
             # Store gradients for debugging
             history['gradients'].append([float(g.item() if isinstance(g, torch.Tensor) else g) for g in grad])
+            history['mean_cg_iters'].append(self.last_gradient_stats.get('mean_cg_iters'))
+            history['trace_cg_iters'].append(self.last_gradient_stats.get('trace_cg_iters'))
             if verbose:
                 print(f"  Iter {it}: Gradients = {[float(g.item() if isinstance(g, torch.Tensor) else g) for g in grad]}")
             
@@ -1508,13 +1616,14 @@ def setup_operators(ws, toeplitz, sigmasq_scalar, cdtype):
     A_var = create_A_var(ws, toeplitz, sigmasq_scalar, cdtype)
     
     return A_mean, A_var, Gv
-def create_jacobi_precond(ws, sigmasq_scalar):
+def create_jacobi_precond(ws, sigmasq_scalar, diag_scale=1.0):
     """
-    Build M^{-1} for A_mean = D C D + σ^2 I, approximated by diag(ws^2) + σ^2 I.
+    Build M^{-1} for A_mean = D C D + σ^2 I, approximated by
+    diag_scale * diag(|ws|^2) + σ^2 I.
     """
     # ws: (M,)  1D tensor of length = # features
     # sigmasq_scalar: scalar noise variance
-    diag_elements = ws.pow(2) + sigmasq_scalar
+    diag_elements = diag_scale * ws.abs().pow(2).real + sigmasq_scalar
     # (you might want to clamp diag_elements to be >= epsilon to avoid zeros)
     def M_inv(v):
         # v has shape (..., M); we divide elementwise along the last dim

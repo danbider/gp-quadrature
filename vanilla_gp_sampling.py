@@ -199,6 +199,53 @@ def sample_gp_matern(
         kernel_params={"nu": nu}
     )
 
+def sample_bernoulli_gp(
+    x: torch.Tensor,
+    length_scale: float = 1.0,
+    variance: float = 1.0,
+    noise_variance: float = 1e-4,  # Small noise for numerical stability
+    mean_func: Callable[[torch.Tensor], torch.Tensor] = mean_func_zero,
+    seed: Optional[int] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Sample from a Bernoulli distribution where probabilities are determined by 
+    passing a GP through a sigmoid function.
+    
+    Args:
+        x: Input points tensor of shape (n, d)
+        length_scale: Kernel length scale parameter
+        variance: Kernel variance parameter
+        noise_variance: Small noise variance for numerical stability
+        mean_func: Mean function for the GP
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Tuple (y, f) where:
+            y: Binary observations sampled from Bernoulli(sigmoid(f)), shape (n,)
+            f: The underlying GP function values before sigmoid, shape (n,)
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+    
+    # Sample from GP with squared exponential kernel
+    f = sample_gp_fast(
+        x=x,
+        mean_func=mean_func,
+        kernel_func=squared_exponential_kernel,
+        num_samples=1,  # Single sample
+        length_scale=length_scale,
+        variance=variance,
+        noise_variance=noise_variance
+    )
+    
+    # Convert GP values to probabilities using sigmoid
+    probs = torch.sigmoid(f)
+    
+    # Sample from Bernoulli distribution
+    y = torch.bernoulli(probs)
+    
+    return y, f
+
 def test_gp_sampling():
     """
     Test the GP sampling functionality with different kernels.

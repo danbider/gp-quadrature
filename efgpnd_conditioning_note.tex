@@ -1,0 +1,983 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath, amssymb, mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue
+}
+
+\setlist[itemize]{leftmargin=1.5em}
+\setlength{\parskip}{0.6em}
+\setlength{\parindent}{0pt}
+
+\title{EFGPND Conditioning Note}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+This note updates the earlier $\sigma_n^2$ memo with the current picture:
+\begin{itemize}
+  \item the original noise-trace pathology was real, and the specialized
+  feature-space formula fixed most of it;
+  \item the remaining hard piece is now the shared mean solve
+  \[
+    (G + \sigma_n^2 I)\beta = D F^\ast y,
+  \]
+  not the old $\sigma_n^2$ trace block;
+  \item this is primarily a large-$n$ conditioning problem;
+  \item factoring out $1/\sigma_n^2$ by itself does \emph{not} improve the
+  condition number of that mean system;
+  \item the next algebraic opportunity for the remaining lengthscale problem is
+  to differentiate the \emph{whole approximate objective} in feature space,
+  rather than only rewriting the trace term.
+\end{itemize}
+
+\section*{1. Operators}
+
+Write the approximate kernel in feature form as
+\begin{equation}
+\widetilde K = \Phi \Phi^\ast,
+\qquad
+\Phi = F D,
+\end{equation}
+and define
+\begin{equation}
+G = \Phi^\ast \Phi = D(F^\ast F)D.
+\end{equation}
+
+Then the data-space and feature-space systems are
+\begin{equation}
+K = \widetilde K + \sigma_n^2 I
+= \Phi \Phi^\ast + \sigma_n^2 I,
+\end{equation}
+\begin{equation}
+A_{\mathrm{mean}} = G + \sigma_n^2 I.
+\end{equation}
+
+The shared solve used to build
+\[
+\alpha = K^{-1}y
+\]
+is the feature-space system
+\begin{equation}
+A_{\mathrm{mean}} \beta = D F^\ast y,
+\qquad
+\alpha = \frac{1}{\sigma_n^2}\left(y - F D \beta\right).
+\end{equation}
+
+This same $\alpha$ enters the quadratic-form part of \emph{every}
+hypergradient:
+\begin{equation}
+y^\top K^{-1} \left(\frac{\partial K}{\partial \theta}\right) K^{-1} y
+=
+\alpha^\top \left(\frac{\partial K}{\partial \theta}\right) \alpha.
+\end{equation}
+
+\section*{2. Why Large $n$ Makes This Bad}
+
+The current difficulty is most apparent in large dense datasets such as the
+PRISM raster because the top eigenvalues of $G = D(F^\ast F)D$ grow with the
+sampling density. On a fixed domain with infill sampling, this means they grow
+roughly with $n$, up to kernel-dependent constants and the scale set by
+$\sigma_f^2$.
+
+So the mean system has condition number
+\begin{equation}
+\kappa(A_{\mathrm{mean}})
+\approx
+\frac{\lambda_{\max}(G) + \sigma_n^2}{\sigma_n^2}.
+\end{equation}
+
+This becomes bad for three separate reasons:
+\begin{itemize}
+  \item large $n$ increases $\lambda_{\max}(G)$;
+  \item large $\sigma_f^2$ increases the scale of $G$;
+  \item small or moderate $\sigma_n^2$ leaves a weak floor on the bottom of the
+  spectrum.
+\end{itemize}
+
+This explains why the problem is much more visible on PRISM than on smaller
+datasets even when the number of features $M$ is only a few hundred.
+
+\section*{3. Why Small Residual Does Not Mean Good Gradient}
+
+CG controls the residual
+\[
+r = b - A \hat x,
+\]
+not the solution error directly. For a linear system $Ax = b$,
+\begin{equation}
+\frac{\|x - \hat x\|}{\|x\|}
+\lesssim
+\kappa(A)\,
+\frac{\|r\|}{\|b\|}.
+\end{equation}
+
+So if $\kappa(A_{\mathrm{mean}})$ is on the order of $10^7$ to $10^8$, then a
+relative residual tolerance such as $10^{-4}$ or even $10^{-5}$ is a weak
+guarantee for the quality of $K^{-1}y$.
+
+That is exactly what the fixed-state PRISM checks show: many CG iterations,
+apparently small residuals, and still a poor approximation to the true
+feature-space solve.
+
+\section*{4. Why the $\sigma_n^2$ Fix Worked}
+
+The earlier noise-variance problem was different. The old stochastic trace term
+for $\sigma_n^2$ required repeated solves with harsh probe right-hand sides of
+the form
+\begin{equation}
+A_{\mathrm{mean}}^{-1}(D F^\ast z).
+\end{equation}
+
+After the algebraic rewrite, the trace identity becomes
+\begin{equation}
+\operatorname{tr}(K^{-1})
+=
+\frac{n}{\sigma_n^2}
+-
+\frac{1}{\sigma_n^2}
+\operatorname{tr}(A_{\mathrm{mean}}^{-1} G),
+\end{equation}
+and the corresponding Hutchinson estimator uses solves of the form
+\begin{equation}
+A_{\mathrm{mean}}^{-1}(Gv).
+\end{equation}
+
+The gain did \emph{not} come mainly from pulling out the factor
+$1/\sigma_n^2$. The real gain came from changing the problem structurally:
+\begin{itemize}
+  \item an exact closed-form term $n/\sigma_n^2$ was peeled off;
+  \item the remaining solves use $Gv$, so the right-hand side lives in
+  $\mathrm{range}(G)$;
+  \item weak or null directions are suppressed instead of being excited by raw
+  white-noise probes.
+\end{itemize}
+
+That is why the $\sigma_n^2$ trace block became dramatically easier.
+
+\section*{5. Does Factoring Out $1/\sigma_n^2$ Help the Mean Solve?}
+
+Not by itself.
+
+The code already has the scaled operator
+\begin{equation}
+A_{\mathrm{var}} = I + \frac{1}{\sigma_n^2} G,
+\end{equation}
+implemented as
+\[
+\texttt{create\_A\_var}.
+\]
+
+But
+\begin{equation}
+A_{\mathrm{mean}} = G + \sigma_n^2 I = \sigma_n^2 A_{\mathrm{var}}.
+\end{equation}
+
+Since multiplying a matrix by a positive scalar does not change its condition
+number,
+\begin{equation}
+\kappa(A_{\mathrm{mean}})
+=
+\kappa(A_{\mathrm{var}}).
+\end{equation}
+
+So simply factoring out $1/\sigma_n^2$ does \emph{not} cure the mean-solve
+conditioning problem. It only rescales the operator.
+
+\section*{6. Current Empirical Picture on Late PRISM}
+
+At a representative late PRISM state
+\begin{equation}
+\ell = 0.09256,
+\qquad
+\sigma_f^2 = 3.878,
+\qquad
+\sigma_n^2 = 0.05202,
+\qquad
+M = 625,
+\end{equation}
+I compared \texttt{compute\_gradients} against the exact feature-space solve for
+the \emph{current approximate objective}, using the same Hutchinson probes.
+
+The exact raw/log-parameter gradient was approximately
+\begin{equation}
+g_{\mathrm{exact}}
+\approx
+\begin{bmatrix}
+1.40 \times 10^6 \\
+-7.19 \times 10^4 \\
+-6.36 \times 10^5
+\end{bmatrix}.
+\end{equation}
+
+The observed relative raw-gradient errors were:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+setting & mean CG iters & trace CG iters & relative raw-gradient error \\
+\midrule
+baseline, $\texttt{cg\_tol}=10^{-4}$ & 753 & 178 & $2.86 \times 10^2$ \\
+preconditioned, $\texttt{cg\_tol}=10^{-4}$ & 166 & 50 & $3.21 \times 10^1$ \\
+preconditioned + warm start, $\texttt{cg\_tol}=10^{-4}$ & 69 & 50 & $2.76 \times 10^1$ \\
+preconditioned, $\texttt{cg\_tol}=10^{-5}$ & 977 & 194 & $3.22 \times 10^{-1}$ \\
+preconditioned + warm start, $\texttt{cg\_tol}=10^{-5}$ & 685 & 194 & $2.21 \times 10^{-1}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+So:
+\begin{itemize}
+  \item preconditioning helps a lot;
+  \item warm starting helps further;
+  \item but late in training, even $\texttt{cg\_tol}=10^{-5}$ is still only
+  moderately accurate, not exact.
+\end{itemize}
+
+\section*{7. The Next Algebraic Win: Special-Case $\sigma_f^2$}
+
+The signal variance is also algebraically special. If
+\begin{equation}
+\widetilde K = \sigma_f^2 \widetilde K_0,
+\end{equation}
+then
+\begin{equation}
+\frac{\partial K}{\partial \sigma_f^2}
+=
+\frac{\widetilde K}{\sigma_f^2}
+=
+\frac{K - \sigma_n^2 I}{\sigma_f^2}.
+\end{equation}
+
+Therefore
+\begin{equation}
+\operatorname{tr}\!\left(K^{-1}\frac{\partial K}{\partial \sigma_f^2}\right)
+=
+\frac{1}{\sigma_f^2}
+\operatorname{tr}\!\left(I - \sigma_n^2 K^{-1}\right)
+=
+\frac{n - \sigma_n^2 \operatorname{tr}(K^{-1})}{\sigma_f^2},
+\end{equation}
+and
+\begin{equation}
+\alpha^\top
+\left(\frac{\partial K}{\partial \sigma_f^2}\right)
+\alpha
+=
+\frac{1}{\sigma_f^2}
+\left(
+\alpha^\top K \alpha
+- \sigma_n^2 \alpha^\top \alpha
+\right)
+=
+\frac{y^\top \alpha - \sigma_n^2 \alpha^\top \alpha}{\sigma_f^2}.
+\end{equation}
+
+So the positive-parameter gradient for $\sigma_f^2$ is
+\begin{equation}
+\frac{\partial}{\partial \sigma_f^2}\log p(y \mid \theta)
+=
+\frac{1}{2\sigma_f^2}
+\left(
+n - \sigma_n^2 \operatorname{tr}(K^{-1})
+- y^\top \alpha
++ \sigma_n^2 \alpha^\top \alpha
+\right).
+\end{equation}
+
+In raw/log-parameter space, this becomes
+\begin{equation}
+g_{\log \sigma_f^2}
+=
+\sigma_f^2 \frac{\partial}{\partial \sigma_f^2}\log p(y \mid \theta)
+=
+\frac{1}{2}
+\left(
+n - \sigma_n^2 \operatorname{tr}(K^{-1})
+- y^\top \alpha
++ \sigma_n^2 \alpha^\top \alpha
+\right).
+\end{equation}
+
+Likewise, the raw/log-parameter noise gradient is
+\begin{equation}
+g_{\log \sigma_n^2}
+=
+\sigma_n^2 \frac{\partial}{\partial \sigma_n^2}\log p(y \mid \theta)
+=
+\frac{\sigma_n^2}{2}
+\left(
+\operatorname{tr}(K^{-1}) - \alpha^\top \alpha
+\right).
+\end{equation}
+
+This means that once $\alpha$ and $\operatorname{tr}(K^{-1})$ are available,
+both $\sigma_f^2$ and $\sigma_n^2$ can be handled \emph{without} their own
+stochastic derivative blocks. Only the lengthscale still needs the hard
+derivative-specific trace machinery.
+
+\section*{8. Methodological Implication}
+
+The main lesson is not merely ``use more CG iterations.'' The better
+methodology is:
+\begin{itemize}
+  \item exploit algebraic structure for special hyperparameters whenever
+  possible;
+  \item avoid stochastic derivative solves for $\sigma_n^2$ and $\sigma_f^2$;
+  \item recognize that the remaining hard core is the shared mean solve and the
+  lengthscale derivative, both of which are limited by conditioning rather than
+  by missing algebra.
+\end{itemize}
+
+So the most promising path forward is:
+\begin{enumerate}[leftmargin=1.5em]
+  \item keep the specialized $\sigma_n^2$ treatment;
+  \item special-case $\sigma_f^2$ as above;
+  \item then focus numerical work on the mean solve
+  $(G + \sigma_n^2 I)\beta = D F^\ast y$, where large-$n$ conditioning is now
+  the real bottleneck.
+\end{enumerate}
+
+\section*{9. Lengthscale: What Failed}
+
+After special-casing $\sigma_n^2$ and $\sigma_f^2$, the remaining
+hyperparameter-specific difficult block is the lengthscale trace term
+\[
+\frac{1}{2}\operatorname{tr}\!\left(K^{-1}\partial_\ell K\right).
+\]
+
+The first idea was the direct analogue of the successful $\sigma_n^2$ rewrite.
+Let
+\begin{equation}
+C = F^\ast F,
+\qquad
+D = \operatorname{diag}(w),
+\qquad
+A = D C D + \sigma_n^2 I,
+\end{equation}
+and write
+\begin{equation}
+\partial_\ell \widetilde K = F S_\ell F^\ast,
+\qquad
+S_\ell = \operatorname{diag}(d_\ell),
+\qquad
+d_\ell = \frac{\partial (w^2)}{\partial \ell}.
+\end{equation}
+
+Using the Woodbury form
+\begin{equation}
+K^{-1}
+=
+\sigma_n^{-2}\left(I - \Phi A^{-1}\Phi^\ast\right),
+\qquad
+\Phi = F D,
+\end{equation}
+one gets the exact identity
+\begin{equation}
+\operatorname{tr}\!\left(K^{-1}\partial_\ell K\right)
+=
+\frac{1}{\sigma_n^2}\operatorname{tr}(C S_\ell)
+-
+\frac{1}{\sigma_n^2}
+\operatorname{tr}\!\left(A^{-1} D C S_\ell C D\right).
+\end{equation}
+
+This identity is correct, but the resulting estimator is not numerically useful
+in the low-probe regime of interest.
+
+\subsection*{Why It Failed in Practice}
+
+The problem is that the full lengthscale derivative is \emph{sign-changing}.
+So the formula above is an exact constant minus a noisy stochastic correction
+for an indefinite operator. At $J=1$, this creates very large cancellation
+variance.
+
+On a small exact check with real data ($N=192$, $M=625$), the true lengthscale
+trace was about
+\[
+\operatorname{tr}\!\left(K^{-1}\partial_\ell K\right) \approx -3.576\times 10^3.
+\]
+Over 1000 seeds with $J=1$:
+\begin{itemize}
+  \item the old estimator had mean/std approximately
+  \[
+    -3.575\times 10^3 \;\; / \;\; 7.10\times 10^2;
+  \]
+  \item the full feature-space rewrite had mean/std approximately
+  \[
+    -3.055\times 10^3 \;\; / \;\; 8.82\times 10^4.
+  \]
+\end{itemize}
+
+So the direct rewrite is algebraically right, but statistically terrible at
+$J=1$.
+
+The same pattern showed up on the frozen late-PRISM state used above
+($\ell=0.09256$, $\sigma_f^2=3.878$, $\sigma_n^2=0.05202$, $M=625$). Over 20
+seeds with $J=1$:
+\begin{itemize}
+  \item the old lengthscale trace estimator had sample mean/std approximately
+  \[
+    -7.38\times 10^5 \;\; / \;\; 1.17\times 10^6;
+  \]
+  \item the full rewrite had sample mean/std approximately
+  \[
+    -1.13\times 10^9 \;\; / \;\; 1.01\times 10^{10}.
+  \]
+\end{itemize}
+
+That is why it destabilized training even though the underlying identity was
+correct.
+
+\section*{10. A Better Route: Exact Scale Term + PSD Residual}
+
+The more promising route is \emph{not} to rewrite the whole lengthscale
+derivative at once. Instead, split it into:
+\begin{itemize}
+  \item an exact amplitude-like piece proportional to $\widetilde K$;
+  \item a residual piece that is positive semidefinite in feature space.
+\end{itemize}
+
+Suppose the lengthscale derivative of the spectral weights can be written as
+\begin{equation}
+\frac{\partial (w^2)}{\partial \ell}
+=
+c_\ell \, w^2 - q_\ell,
+\qquad
+q_\ell(\xi) \ge 0
+\;\;\text{for all }\xi.
+\end{equation}
+Equivalently,
+\begin{equation}
+\partial_\ell \widetilde K
+=
+c_\ell \widetilde K - F Q_\ell F^\ast,
+\qquad
+Q_\ell = \operatorname{diag}(q_\ell).
+\end{equation}
+
+Then the trace term becomes
+\begin{align}
+\operatorname{tr}\!\left(K^{-1}\partial_\ell K\right)
+&=
+c_\ell \operatorname{tr}(K^{-1}\widetilde K)
+-
+\operatorname{tr}\!\left(K^{-1} F Q_\ell F^\ast\right) \\
+&=
+c_\ell \left(n - \sigma_n^2 \operatorname{tr}(K^{-1})\right)
+-
+\operatorname{tr}\!\left(K^{-1} F Q_\ell F^\ast\right).
+\end{align}
+
+The first term is exact once $\operatorname{tr}(K^{-1})$ is known from the
+stable $\sigma_n^2$ machinery.
+
+For the residual term, the same Woodbury manipulation gives
+\begin{equation}
+\operatorname{tr}\!\left(K^{-1} F Q_\ell F^\ast\right)
+=
+\frac{1}{\sigma_n^2}\operatorname{tr}(C Q_\ell)
+-
+\frac{1}{\sigma_n^2}
+\operatorname{tr}\!\left(A^{-1} D C Q_\ell C D\right).
+\end{equation}
+
+This has the same basic structure as the successful noise rewrite, but now the
+operator being estimated is associated with the \emph{positive} residual
+$Q_\ell$, not the full sign-changing derivative.
+
+\subsection*{Why This Is More Plausible}
+
+This route avoids the thing that killed the full rewrite: it does not ask one
+Hutchinson estimator to represent the entire indefinite lengthscale derivative
+as a single constant-minus-noisy correction.
+
+Instead:
+\begin{itemize}
+  \item the exact amplitude-like piece is peeled off deterministically;
+  \item the stochastic part is only the residual PSD operator
+  \[
+    F Q_\ell F^\ast;
+  \]
+  \item the feature-space solve still uses the same mean-system matrix
+  \[
+    A = D C D + \sigma_n^2 I.
+  \]
+\end{itemize}
+
+That is much closer in spirit to the $\sigma_n^2$ rewrite, which was stable
+because it estimated a filtered PSD object rather than a sign-changing one.
+
+\section*{11. SE and Mat\'ern Both Fit This Pattern}
+
+\subsection*{Squared Exponential}
+
+For the squared exponential kernel,
+\begin{equation}
+S(\xi)
+=
+\sigma_f^2
+\left((2\pi)\ell^2\right)^{d/2}
+\exp\!\left(-2\pi^2 \ell^2 \|\xi\|^2\right),
+\end{equation}
+so
+\begin{equation}
+\frac{\partial S}{\partial \ell}
+=
+S(\xi)
+\left(
+\frac{d}{\ell}
+- 4\pi^2 \ell \|\xi\|^2
+\right).
+\end{equation}
+
+Therefore
+\begin{equation}
+\frac{\partial (w^2)}{\partial \ell}
+=
+\frac{d}{\ell} w^2
+-
+\underbrace{4\pi^2 \ell \|\xi\|^2 w^2}_{q_\ell(\xi) \ge 0}.
+\end{equation}
+
+So the SE kernel fits the split exactly with
+\begin{equation}
+c_\ell = \frac{d}{\ell},
+\qquad
+Q_\ell = \operatorname{diag}\!\left(4\pi^2 \ell \|\xi\|^2 w^2\right).
+\end{equation}
+
+\subsection*{Mat\'ern}
+
+For the Mat\'ern family in the parameterization used here,
+\begin{equation}
+S(\xi)
+=
+\sigma_f^2 c_{\nu,d}\,
+\ell^d
+\left(2\nu + 4\pi^2 \ell^2 \|\xi\|^2\right)^{-(\nu + d/2)},
+\end{equation}
+for a positive constant $c_{\nu,d}$ independent of $\ell$ and $\xi$.
+Differentiating gives
+\begin{equation}
+\frac{\partial S}{\partial \ell}
+=
+S(\xi)
+\left(
+\frac{d}{\ell}
+-
+\frac{8\pi^2(\nu + d/2)\,\ell \|\xi\|^2}
+{2\nu + 4\pi^2 \ell^2 \|\xi\|^2}
+\right).
+\end{equation}
+
+So again
+\begin{equation}
+\frac{\partial (w^2)}{\partial \ell}
+=
+\frac{d}{\ell} w^2
+-
+\underbrace{
+\frac{8\pi^2(\nu + d/2)\,\ell \|\xi\|^2}
+{2\nu + 4\pi^2 \ell^2 \|\xi\|^2}
+w^2
+}_{q_\ell(\xi) \ge 0}.
+\end{equation}
+
+Therefore the same exact-plus-residual strategy is not just SE-specific; it
+extends naturally to Mat\'ern as well.
+
+\section*{12. What Computation Would Actually Change}
+
+The key term to change is still only
+\[
+\frac{1}{2}\operatorname{tr}\!\left(K^{-1}\partial_\ell K\right).
+\]
+
+Under the proposed split, this becomes:
+\begin{itemize}
+  \item an exact scale term
+  \[
+    \frac{c_\ell}{2}\left(n - \sigma_n^2 \operatorname{tr}(K^{-1})\right),
+  \]
+  \item plus a residual trace term built from
+  \[
+    H_\ell^{\mathrm{res}} = D C Q_\ell C D.
+  \]
+\end{itemize}
+
+The stochastic residual is still a Hutchinson trace estimate in feature space:
+\begin{equation}
+\operatorname{tr}\!\left(A^{-1} H_\ell^{\mathrm{res}}\right)
+\approx
+\frac{1}{J}\sum_{j=1}^J v_j^\ast A^{-1} H_\ell^{\mathrm{res}} v_j.
+\end{equation}
+
+So there is still:
+\begin{itemize}
+  \item a stochastic trace term;
+  \item a CG solve with the same operator
+  \[
+    A = D C D + \sigma_n^2 I;
+  \]
+  \item one solve per probe.
+\end{itemize}
+
+What changes is the right-hand side construction. The residual right-hand side
+is
+\begin{equation}
+b_j^{\mathrm{res}}
+=
+H_\ell^{\mathrm{res}} v_j
+=
+D C Q_\ell C D v_j,
+\end{equation}
+which uses only Toeplitz applications of $C = F^\ast F$ and diagonal
+multiplications.
+
+\section*{13. Complexity and Expected Benefit}
+
+This residual rewrite would \emph{not} fix the shared mean solve
+\[
+(G + \sigma_n^2 I)\beta = D F^\ast y,
+\]
+which is still the main common bottleneck.
+
+But it would make the lengthscale-specific trace work look like
+\begin{equation}
+O\!\left(J M \log m\right)
++
+O\!\left(k_{\mathrm{cg}} J M \log m\right),
+\end{equation}
+up to moderate constants, while keeping the stochastic part tied to a PSD
+residual operator rather than the full sign-changing derivative.
+
+So the best current picture is:
+\begin{itemize}
+  \item the full direct lengthscale rewrite is mathematically correct but too
+  noisy at low $J$;
+  \item the natural next attempt is a \emph{partial} rewrite:
+  exact scale term plus PSD residual;
+  \item that route generalizes cleanly to SE and Mat\'ern, but in its naive form
+  it is still not good enough at $J=1$.
+\end{itemize}
+
+\subsection*{Current Status of the PSD-Residual Split}
+
+I tested this split directly against exact ground truth for the approximate
+EFGP objective, both on small dense real-data subsets and on the full PRISM
+state with exact $M\times M$ systems.
+
+The result is disappointing: the naive split is still dramatically noisier than
+the old estimator in the $J=1$ regime.
+
+On the small SE check ($N=192$, $M=625$), the exact lengthscale trace was about
+\[
+-3.576\times 10^3.
+\]
+Over 1000 seeds with $J=1$:
+\begin{itemize}
+  \item the old estimator had mean/std approximately
+  \[
+    -3.594\times 10^3 \;\; / \;\; 7.00\times 10^2;
+  \]
+  \item the PSD-residual split had mean/std approximately
+  \[
+    -1.506\times 10^3 \;\; / \;\; 1.24\times 10^5.
+  \]
+\end{itemize}
+
+On the small Mat\'ern check ($N=192$, $M=3481$):
+\begin{itemize}
+  \item the old estimator had mean/std approximately
+  \[
+    -1.973\times 10^3 \;\; / \;\; 2.06\times 10^2;
+  \]
+  \item the PSD-residual split had mean/std approximately
+  \[
+    -2.464\times 10^3 \;\; / \;\; 4.33\times 10^4.
+  \]
+\end{itemize}
+
+On the frozen full-PRISM state, the exact lengthscale trace was about
+\[
+-3.628\times 10^4.
+\]
+Over 20 seeds with $J=1$:
+\begin{itemize}
+  \item the old estimator had mean/std approximately
+  \[
+    -3.606\times 10^4 \;\; / \;\; 7.65\times 10^3;
+  \]
+  \item the PSD-residual split had mean/std approximately
+  \[
+    -4.673\times 10^8 \;\; / \;\; 1.95\times 10^9.
+  \]
+\end{itemize}
+
+So the practical conclusion is now:
+\begin{itemize}
+  \item the full rewrite fails;
+  \item the exact-scale-plus-PSD-residual split is conceptually cleaner, but
+  still fails badly as a low-probe drop-in estimator;
+  \item positive semidefiniteness of the residual alone is not enough to make
+  the resulting Hutchinson estimator usable at $J=1$.
+\end{itemize}
+
+That means the next improvement for lengthscale probably has to come from a
+different direction: better probe design, correlated probes, control variates,
+or a different optimization strategy for the lengthscale parameter itself,
+rather than another straightforward constant-plus-feature-space-trace rewrite.
+
+\section*{14. Whole-Objective Feature-Space Derivative}
+
+The next algebraic candidate is to stop splitting the lengthscale gradient into
+``trace term'' and ``quadratic term'' in data space, and instead differentiate
+the entire approximate objective directly in feature space.
+
+Write
+\begin{equation}
+K = \sigma_n^2 I + \Phi \Phi^\ast,
+\qquad
+\Phi = F D,
+\qquad
+G = \Phi^\ast \Phi = D C D,
+\qquad
+C = F^\ast F.
+\end{equation}
+Define also
+\begin{equation}
+A = G + \sigma_n^2 I,
+\qquad
+b = D F^\ast y.
+\end{equation}
+
+Then the approximate negative log marginal likelihood can be written exactly as
+\begin{equation}
+\mathcal L(\theta)
+=
+\frac{1}{2}\left[
+(n-M)\log \sigma_n^2
+\;+\;
+\log\det A
+\;+\;
+\frac{1}{\sigma_n^2}
+\left(
+y^\top y - b^\ast A^{-1} b
+\right)
+\right]
+ + \mathrm{const}.
+\end{equation}
+
+Now consider any hyperparameter $\theta$ that changes only the spectral weights
+$D$ and not $\sigma_n^2$. Then
+\begin{equation}
+\partial_\theta \mathcal L
+=
+\frac{1}{2}\left[
+\operatorname{tr}(A^{-1} A_\theta)
+-
+\frac{1}{\sigma_n^2}
+\left(
+2\,\Re(b_\theta^\ast \beta)
+-
+\beta^\ast A_\theta \beta
+\right)
+\right],
+\qquad
+\beta = A^{-1} b.
+\end{equation}
+
+Here
+\begin{equation}
+A_\theta = D_\theta C D + D C D_\theta,
+\qquad
+b_\theta = D_\theta F^\ast y.
+\end{equation}
+
+It is better numerically to avoid differentiating $w$ directly. Since
+$w^2 = s$, define
+\begin{equation}
+E_\theta
+=
+\operatorname{diag}\!\left(
+\frac{1}{2}\frac{\partial_\theta s}{s}
+\right),
+\end{equation}
+so that $D_\theta = E_\theta D$ and therefore
+\begin{equation}
+A_\theta = E_\theta G + G E_\theta,
+\qquad
+b_\theta = E_\theta b.
+\end{equation}
+
+\subsection*{What Changes Computationally}
+
+The old lengthscale path uses
+\begin{equation}
+\frac{1}{2}
+\left(
+\operatorname{tr}(K^{-1}\partial_\ell K)
+-
+\alpha^\ast (\partial_\ell K)\alpha
+\right),
+\end{equation}
+with a data-space Hutchinson estimator for the trace term and the quadratic
+term expressed through $\alpha = K^{-1} y$.
+
+The proposed feature-space objective derivative instead uses
+\begin{equation}
+\frac{1}{2}\left[
+\operatorname{tr}(A^{-1} A_\ell)
+-
+\frac{1}{\sigma_n^2}
+\left(
+2\,\Re(b_\ell^\ast \beta)
+-
+\beta^\ast A_\ell \beta
+\right)
+\right].
+\end{equation}
+
+Only the trace part remains stochastic:
+\begin{equation}
+\operatorname{tr}(A^{-1} A_\ell)
+\approx
+\frac{1}{J}\sum_{j=1}^J v_j^\ast A^{-1} A_\ell v_j,
+\end{equation}
+with feature-space Rademacher probes $v_j \in \{\pm 1\}^M$.
+
+The right-hand side is now
+\begin{equation}
+A_\ell v
+=
+E_\ell G v + G(E_\ell v),
+\end{equation}
+which requires only Toeplitz applications of $G = D C D$ and diagonal
+multiplications.
+
+\subsection*{Why This Might Be Better}
+
+Relative to the older lengthscale trace estimator, this route has three
+potential advantages:
+\begin{itemize}
+  \item it keeps the entire derivative in feature space;
+  \item it avoids the large deterministic-constant minus noisy-correction
+  structure that killed the previous trace-only rewrites;
+  \item it replaces the data-space derivative probe path with Toeplitz-based
+  applications of $A_\ell$.
+\end{itemize}
+
+But there is also a real risk: $A_\ell$ is still generally sign-indefinite, so
+the Hutchinson trace estimator may still have high variance at very small $J$.
+That has to be checked empirically, not assumed.
+
+\subsection*{Empirical Outcome}
+
+I tested this whole-objective feature-space estimator against exact ground truth
+for the approximate EFGP objective in the same style as the earlier
+lengthscale experiments:
+\begin{itemize}
+  \item small real-data subsets with explicit dense $K$ available;
+  \item the frozen late-PRISM state using exact formed $M\times M$ systems.
+\end{itemize}
+
+The algebra checks out. On the small dense checks, the exact feature-space
+gradient matched the exact dense-$K$ gradient to about $2\times 10^{-3}$ in
+absolute error.
+
+But as an estimator, the picture is mixed:
+\begin{itemize}
+  \item it is \emph{much} better than the previous failed feature-space
+  rewrites;
+  \item it is still materially noisier than the old estimator at $J=1$;
+  \item its feature-space trace solve is harder for CG than the old
+  lengthscale trace solve.
+\end{itemize}
+
+On the small SE check ($N=192$, $M=625$), with $J=1$ over 1000 seeds:
+\begin{itemize}
+  \item the old estimator had gradient mean/std approximately
+  \[
+    3.268\times 10^2 \;\; / \;\; 3.500\times 10^2;
+  \]
+  \item the whole-objective feature-space estimator had gradient mean/std
+  approximately
+  \[
+    1.834\times 10^2 \;\; / \;\; 4.611\times 10^3.
+  \]
+\end{itemize}
+
+On the small Mat\'ern check ($N=192$, $M=3481$):
+\begin{itemize}
+  \item the old estimator had gradient mean/std approximately
+  \[
+    -1.987\times 10^2 \;\; / \;\; 1.031\times 10^2;
+  \]
+  \item the whole-objective feature-space estimator had gradient mean/std
+  approximately
+  \[
+    -1.444\times 10^2 \;\; / \;\; 1.678\times 10^3.
+  \]
+\end{itemize}
+
+So on the small checks it is clearly worse than the current estimator.
+
+On the frozen late-PRISM state ($N \approx 1.21\times 10^7$, $M=625$), with
+$J=1$ over 20 seeds:
+\begin{itemize}
+  \item the old estimator had gradient mean/std approximately
+  \[
+    1.507167\times 10^7 \;\; / \;\; 3.827\times 10^3;
+  \]
+  \item the whole-objective feature-space estimator had gradient mean/std
+  approximately
+  \[
+    1.512696\times 10^7 \;\; / \;\; 6.854\times 10^5.
+  \]
+\end{itemize}
+
+This is still far noisier than the old estimator, but it is no longer
+catastrophically bad. The relative standard deviation is about $4.5\%$ on this
+PRISM state, versus about $2.5\times 10^{-4}$ for the old estimator.
+
+The speed story goes the other way. On the same frozen PRISM state with the
+actual fast operators and Jacobi preconditioning:
+\begin{itemize}
+  \item old lengthscale path: about $1.23$s, with about $172$ CG iterations;
+  \item whole-objective feature-space path: about $0.17$s, but about $1250$ CG
+  iterations, i.e.\ it hits the default $2M$ cap.
+\end{itemize}
+
+So the new estimator removes almost all of the $N$-scale work, but it replaces
+it with a substantially harder feature-space Krylov problem.
+
+The practical conclusion is:
+\begin{itemize}
+  \item this is \emph{not} a clean drop-in replacement for the current
+  lengthscale estimator;
+  \item it is algebraically sound and dramatically cheaper in wall clock on
+  very large datasets;
+  \item but at low probe count it is still noisier than the old estimator, and
+  its trace solve is harder for CG;
+  \item if this direction is pursued further, it probably needs additional
+  variance reduction or a stronger/recycled solver, not just the bare algebraic
+  rewrite.
+ \end{itemize}
+
+\end{document}

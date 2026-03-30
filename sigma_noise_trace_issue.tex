@@ -1,0 +1,382 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath, amssymb, mathtools}
+\usepackage{bm}
+\usepackage{enumitem}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue
+}
+
+\setlist[itemize]{leftmargin=1.5em}
+\setlength{\parskip}{0.6em}
+\setlength{\parindent}{0pt}
+
+\title{What Is Actually Bad About the $\sigma_n^2$ Gradient?}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+This note records the specific computation that becomes pathological in the
+small-lengthscale / large-variance / small-noise regime for
+\texttt{efgpnd.py}.
+
+The short version is:
+\begin{itemize}
+  \item The bad computation is not the whole hypergradient uniformly.
+  \item It is overwhelmingly the stochastic trace term for the noise variance.
+  \item More specifically, it is the CG solve for the noise-block probe systems
+  inside the batched Hutchinson trace estimator.
+\end{itemize}
+
+\section*{Gradient Split}
+
+The log marginal likelihood gradient has the usual form
+\begin{equation}
+\nabla_\theta \log p(y \mid \theta)
+= \frac{1}{2}
+\left[
+\operatorname{tr}\!\left(K^{-1} \frac{\partial K}{\partial \theta}\right)
+- y^\top K^{-1}
+\left(\frac{\partial K}{\partial \theta}\right)
+K^{-1} y
+\right].
+\end{equation}
+
+In \texttt{efgpnd.py}, these are the two pieces:
+\begin{itemize}
+  \item \texttt{term1}: the stochastic Hutchinson trace term
+  \item \texttt{term2}: the quadratic form
+\end{itemize}
+
+If we define
+\begin{equation}
+\alpha = K^{-1} y,
+\end{equation}
+then the second term can be written as
+\begin{equation}
+y^\top K^{-1}
+\left(\frac{\partial K}{\partial \theta}\right)
+K^{-1} y
+=
+\alpha^\top
+\left(\frac{\partial K}{\partial \theta}\right)
+\alpha.
+\end{equation}
+
+For the noise variance parameter,
+\begin{equation}
+\frac{\partial K}{\partial \sigma_n^2} = I,
+\end{equation}
+so the gradient pieces specialize to
+\begin{equation}
+\operatorname{term2}_{\sigma_n^2} = \alpha^\top \alpha,
+\end{equation}
+and
+\begin{equation}
+\operatorname{term1}_{\sigma_n^2}
+=
+\operatorname{tr}(K^{-1}).
+\end{equation}
+
+The key point is that $\alpha^\top \alpha$ is cheap once $\alpha$ has already
+been computed. The hard object is $\operatorname{tr}(K^{-1})$.
+
+\section*{The Specific Bad Computation}
+
+Let the approximate kernel be written in feature form as
+\begin{equation}
+\widetilde K = \Phi \Phi^\ast,
+\qquad
+\Phi = F D,
+\end{equation}
+where:
+\begin{itemize}
+  \item $F$ is the nonuniform Fourier operator used in the code
+  \item $D$ is the diagonal matrix of spectral weights
+\end{itemize}
+
+Then the data-space system is
+\begin{equation}
+K = \widetilde K + \sigma_n^2 I
+=
+\Phi \Phi^\ast + \sigma_n^2 I.
+\end{equation}
+
+The CG system that the implementation actually solves is written in feature
+space:
+\begin{equation}
+A \beta = b,
+\qquad
+A = D(F^\ast F)D + \sigma_n^2 I.
+\end{equation}
+
+For the noise-variance trace block, the right-hand side is built from white
+noise probe vectors $z$, and the core computation is
+\begin{equation}
+A^{-1}(D F^\ast z).
+\end{equation}
+
+That is the slow part.
+
+\section*{Why the Noise Block Is Much Worse Than the Other Hyperparameters}
+
+For the kernel hyperparameters, the trace estimator probes
+\begin{equation}
+\frac{\partial K}{\partial \theta}
+\end{equation}
+through spectrally weighted directions. In code, those right-hand sides are
+multiplied by derivative factors such as $D'$, and then filtered through the
+Toeplitz operator again. Those probes are structured and relatively smooth.
+
+For the noise parameter, there is no such filtering:
+\begin{equation}
+\frac{\partial K}{\partial \sigma_n^2} = I.
+\end{equation}
+
+So the trace term asks for
+\begin{equation}
+\operatorname{tr}(K^{-1}),
+\end{equation}
+which means the Hutchinson estimator probes all modes of $K^{-1}$, including
+the weakly regularized ones. When $\sigma_n^2$ is small, those are exactly the
+directions that are hardest for CG.
+
+That is why the noise block is much worse than the lengthscale or variance
+blocks even when they are solved inside the same batched CG call.
+
+\section*{Real-Data Evidence}
+
+I used standardized \texttt{usa\_temp\_data} with the standalone diagnostics:
+\begin{itemize}
+  \item \texttt{benchmark\_cg\_preconditioning\_realdata.py}
+  \item \texttt{diagnose\_sigma\_noise\_trace\_blocks.py}
+\end{itemize}
+
+In a hard regime with
+\begin{equation}
+\ell = 0.03,
+\qquad
+\sigma_f^2 = 10,
+\qquad
+\varepsilon = 10^{-4},
+\qquad
+J = 3,
+\qquad
+\text{cg\_tol} = 10^{-3},
+\qquad
+n = 4766,
+\end{equation}
+the per-RHS CG iteration counts were:
+
+\subsection*{When $\sigma_n^2 = 10^{-4}$}
+\begin{itemize}
+  \item $d\ell$: $59, 59, 47$
+  \item $d\sigma_f^2$: $29, 30, 24$
+  \item $d\sigma_n^2$: $4162, 3945, 3667$
+\end{itemize}
+
+\subsection*{When $\sigma_n^2 = 10^{-3}$}
+\begin{itemize}
+  \item $d\ell$: $59, 59, 47$
+  \item $d\sigma_f^2$: $29, 30, 24$
+  \item $d\sigma_n^2$: $1643, 1631, 1588$
+\end{itemize}
+
+\subsection*{When $\sigma_n^2 = 10^{-2}$}
+\begin{itemize}
+  \item $d\ell$: $59, 59, 47$
+  \item $d\sigma_f^2$: $29, 29, 24$
+  \item $d\sigma_n^2$: $634, 629, 606$
+\end{itemize}
+
+So increasing $\sigma_n^2$ helps a lot, but even at $\sigma_n^2 = 10^{-2}$ the
+noise block is still an order of magnitude harder than the kernel-hyper blocks.
+That means tiny noise is not the whole story. The deeper issue is that the
+$\sigma_n^2$ trace term is structurally the wrong kind of probe for this solver.
+
+\section*{Why a Floor Helps but Does Not Fix the Problem}
+
+In the same hard real-data regime, a simple diagonal proxy for the feature-space
+operator ranged roughly from
+\begin{equation}
+10^{-4}
+\quad \text{to} \quad
+2 \times 10^2,
+\end{equation}
+with a median around
+\begin{equation}
+4 \times 10^{-2}.
+\end{equation}
+
+That is a dynamic range on the order of
+\begin{equation}
+2 \times 10^6.
+\end{equation}
+
+When a floor or jitter is added, the weakest directions get more diagonal
+regularization, so the worst iteration counts come down. But the estimator is
+still trying to approximate
+\begin{equation}
+\operatorname{tr}(K^{-1}),
+\end{equation}
+which means the same structurally difficult quantity is still present. The
+floor reduces the severity of the problem, but it does not remove the
+underlying cause.
+
+\section*{Clamp Versus Additive Jitter}
+
+Two common numerical modifications are
+\begin{equation}
+\sigma_{\mathrm{eff}}^2
+=
+\max(\sigma_n^2, \tau^2)
+\end{equation}
+and
+\begin{equation}
+\sigma_{\mathrm{eff}}^2
+=
+\sigma_n^2 + \tau^2.
+\end{equation}
+
+Both change the effective operator being solved.
+
+The additive version is smoother in $\sigma_n^2$ and easier to interpret as
+``learned noise plus fixed numerical diagonal regularization.'' But it is still
+a numerical or modeling intervention, not an exact optimization of the original
+objective.
+
+So additive jitter is more coherent than a hard clamp, but it is not magically
+free of bias.
+
+\section*{A More Defensible Way to Treat the Noise Gradient}
+
+The publishable fix is not ``do not learn $\sigma_n^2$.'' The better story is:
+\begin{itemize}
+  \item keep the current stochastic machinery for the kernel hyperparameters
+  \item treat $\sigma_n^2$ separately, because its derivative is algebraically
+  special
+\end{itemize}
+
+Start from
+\begin{equation}
+K = \sigma_n^2 I_n + \Phi \Phi^\ast,
+\end{equation}
+with $\Phi \in \mathbb{C}^{n \times M}$ and
+\begin{equation}
+S = \Phi^\ast \Phi = D(F^\ast F)D.
+\end{equation}
+
+Then the matrix determinant lemma gives
+\begin{equation}
+\det(\sigma_n^2 I_n + \Phi \Phi^\ast)
+=
+(\sigma_n^2)^{n-M} \det(\sigma_n^2 I_M + S),
+\end{equation}
+or equivalently,
+\begin{equation}
+\log \det(\sigma_n^2 I_n + \Phi \Phi^\ast)
+=
+n \log \sigma_n^2
++
+\log \det\!\left(I_M + \sigma_n^{-2} S\right).
+\end{equation}
+
+Likewise, the nonzero eigenvalues of $\Phi \Phi^\ast$ and $S = \Phi^\ast \Phi$
+match, so
+\begin{equation}
+\operatorname{tr}\!\left((\sigma_n^2 I_n + \Phi \Phi^\ast)^{-1}\right)
+=
+\frac{n-M}{\sigma_n^2}
++
+\operatorname{tr}\!\left((\sigma_n^2 I_M + S)^{-1}\right),
+\end{equation}
+which can also be written as
+\begin{equation}
+\operatorname{tr}\!\left((\sigma_n^2 I_n + \Phi \Phi^\ast)^{-1}\right)
+=
+\frac{n-M}{\sigma_n^2}
++
+\frac{1}{\sigma_n^2}
+\operatorname{tr}\!\left(\left(I_M + \sigma_n^{-2} S\right)^{-1}\right).
+\end{equation}
+
+This is the crucial identity. It says that the noise-variance trace term can be
+reduced to a feature-space trace, instead of a data-space white-noise
+Hutchinson problem.
+
+If we write the $\sigma_n^2$ gradient as
+\begin{equation}
+\frac{\partial}{\partial \sigma_n^2} \log p(y \mid \theta)
+=
+\frac{1}{2}
+\left[
+\operatorname{tr}(K^{-1}) - \alpha^\top \alpha
+\right],
+\end{equation}
+then the trace piece becomes
+\begin{equation}
+\operatorname{tr}(K^{-1})
+=
+\frac{n-M}{\sigma_n^2}
++
+\frac{1}{\sigma_n^2}
+\operatorname{tr}\!\left(\left(I_M + \sigma_n^{-2} S\right)^{-1}\right).
+\end{equation}
+
+So the entire noise gradient can be written as
+\begin{equation}
+\frac{\partial}{\partial \sigma_n^2} \log p(y \mid \theta)
+=
+\frac{1}{2}
+\left[
+\frac{n-M}{\sigma_n^2}
++
+\frac{1}{\sigma_n^2}
+\operatorname{tr}\!\left(\left(I_M + \sigma_n^{-2} S\right)^{-1}\right)
+- \alpha^\top \alpha
+\right].
+\end{equation}
+
+This is much more defensible than clamping alone, because it uses the algebraic
+structure of the noise hyperparameter instead of forcing the same noisy
+estimator used for the kernel hyperparameters onto a fundamentally different
+derivative.
+
+\section*{Bottom Line}
+
+The specific bad computation is
+\begin{equation}
+\operatorname{tr}(K^{-1}),
+\end{equation}
+estimated stochastically through the $\sigma_n^2$ noise block, which requires
+repeated solves of the form
+\begin{equation}
+\left(D(F^\ast F)D + \sigma_n^2 I\right)^{-1}(D F^\ast z).
+\end{equation}
+
+That is the pathological part of the current method.
+
+The quadratic form
+\begin{equation}
+\alpha^\top \alpha
+\end{equation}
+is not the problem.
+
+If $\sigma_n^2 = 10^{-2}$ is still not acceptable, then the issue is not just
+``noise too small.'' It means the stochastic trace formulation for the
+$\sigma_n^2$ hypergradient is intrinsically the hard piece of the current
+method.
+
+\end{document}

@@ -132,9 +132,9 @@ def negative_log_marginal_likelihood(x, y, lengthscale, variance, noise, kernel_
         y = y.unsqueeze(1)
     n = x.shape[0]
     # Compute kernel matrix K(X,X) and add noise on the diagonal.
-    if kernel_type == "squared_exponential":
+    if kernel_type == "SquaredExponential":
         K = squared_exponential_kernel(x, x, lengthscale, variance) + noise * torch.eye(n, dtype=x.dtype)
-    elif kernel_type == "matern":
+    elif kernel_type == "Matern":
         K = matern_kernel(x, x, lengthscale, variance) + noise * torch.eye(n, dtype=x.dtype)
     else:
         raise ValueError(f"Unsupported kernel type: {kernel_type}")

@@ -1,0 +1,220 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+
+\setlength{\parskip}{0.4em}
+\setlength{\parindent}{0pt}
+
+\title{EFGPND Gradient Computation}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+Let
+\[
+\widetilde K \approx \Phi \Phi^\ast,
+\qquad
+\Phi = F D,
+\qquad
+G = \Phi^\ast \Phi = D F^\ast F D,
+\]
+and
+\[
+K \approx \Phi \Phi^\ast + \sigma^2 I.
+\]
+If \texttt{noise\_floor} is active, use
+\[
+\sigma_{\mathrm{eff}}^2 = \max(\sigma^2,\texttt{noise\_floor})
+\]
+in place of $\sigma^2$ below.
+
+For a hyperparameter $\theta$, define
+\[
+D'_\theta = h^d \frac{\partial \widehat k_\theta(\xi)}{\partial \theta}.
+\]
+
+The approximate log marginal gradient is written as
+\[
+\frac{\partial \mathcal L}{\partial \theta}
+=
+\frac{1}{2}\Bigl(T_1(\theta) - T_2(\theta)\Bigr),
+\]
+where
+\[
+T_1(\theta)
+=
+\operatorname{tr}\!\left(K^{-1}\frac{\partial K}{\partial \theta}\right),
+\qquad
+T_2(\theta)
+=
+\alpha^\ast \frac{\partial K}{\partial \theta}\alpha,
+\qquad
+\alpha = K^{-1} y.
+\]
+
+\section*{Shared mean solve}
+
+\[
+A \beta_y = D F^\ast y,
+\qquad
+A = G + \sigma^2 I = \Phi^\ast \Phi + \sigma^2 I.
+\]
+\[
+\alpha = \frac{1}{\sigma^2}\left(y - F D \beta_y\right),
+\qquad
+F^\ast \alpha = \frac{1}{\sigma^2}\left(F^\ast y - F^\ast F D \beta_y\right).
+\]
+
+\section*{Generic kernel hyperparameter $\theta$}
+
+For each Hutchinson probe $z_k \in \{-1,1\}^n$,
+\[
+w_{k,\theta} = F D'_\theta F^\ast z_k,
+\qquad
+r_{k,\theta} = D F^\ast F D'_\theta F^\ast z_k.
+\]
+\[
+A \beta_{k,\theta} = r_{k,\theta}.
+\]
+\[
+u_{k,\theta}
+=
+\frac{1}{\sigma^2}\left(w_{k,\theta} - F D \beta_{k,\theta}\right).
+\]
+\[
+T_1(\theta)
+\approx
+\frac{1}{J}\sum_{k=1}^J \langle z_k, u_{k,\theta} \rangle,
+\]
+and
+\[
+T_2(\theta)
+=
+\langle F^\ast \alpha, D'_\theta F^\ast \alpha \rangle.
+\]
+
+\section*{Noise variance $\sigma^2$}
+
+\[
+\frac{\partial K}{\partial \sigma^2} = I,
+\qquad
+T_1(\sigma^2) = \operatorname{tr}(K^{-1}).
+\]
+Using Woodbury,
+\[
+K^{-1}
+=
+\left(\sigma^2 I + \Phi \Phi^\ast\right)^{-1}
+=
+\frac{1}{\sigma^2}I
+-
+\frac{1}{\sigma^2}\Phi
+\left(I + \frac{1}{\sigma^2}\Phi^\ast \Phi\right)^{-1}
+\Phi^\ast
+\frac{1}{\sigma^2}.
+\]
+Since
+\[
+A = \Phi^\ast \Phi + \sigma^2 I
+=
+\sigma^2\left(I + \frac{1}{\sigma^2}\Phi^\ast \Phi\right),
+\]
+we have
+\[
+\left(I + \frac{1}{\sigma^2}\Phi^\ast \Phi\right)^{-1}
+=
+\sigma^2 A^{-1}.
+\]
+Therefore
+\[
+K^{-1}
+=
+\frac{1}{\sigma^2}I
+-
+\frac{1}{\sigma^2}\Phi A^{-1}\Phi^\ast.
+\]
+Taking the trace and using cyclicity,
+\[
+T_1(\sigma^2)
+=
+\operatorname{tr}(K^{-1})
+=
+\frac{n}{\sigma^2}
+-
+\frac{1}{\sigma^2}\operatorname{tr}(\Phi A^{-1}\Phi^\ast)
+=
+\frac{n}{\sigma^2}
+-
+\frac{1}{\sigma^2}\operatorname{tr}(A^{-1}\Phi^\ast \Phi)
+=
+\frac{n}{\sigma^2}
+-
+\frac{1}{\sigma^2}\operatorname{tr}(A^{-1}G).
+\]
+For feature-space probes $v_k \in \{-1,1\}^M$,
+\[
+A \gamma_k = G v_k.
+\]
+\[
+T_1(\sigma^2)
+\approx
+\frac{n}{\sigma^2}
+-
+\frac{1}{J \sigma^2}\sum_{k=1}^J \langle v_k, \gamma_k \rangle.
+\]
+\[
+T_2(\sigma^2) = \alpha^\ast \alpha.
+\]
+
+\section*{Signal variance $\sigma_f^2$}
+
+\[
+\widetilde K = \sigma_f^2 \widetilde K_0.
+\]
+\[
+\frac{\partial K}{\partial \sigma_f^2}
+=
+\frac{K - \sigma^2 I}{\sigma_f^2}.
+\]
+\[
+T_1(\sigma_f^2)
+=
+\frac{n - \sigma^2 T_1(\sigma^2)}{\sigma_f^2},
+\]
+and
+\[
+T_2(\sigma_f^2)
+=
+\frac{y^\ast \alpha - \sigma^2 \alpha^\ast \alpha}{\sigma_f^2}.
+\]
+
+\section*{Systems solved in the current code}
+
+\[
+A \beta_y = D F^\ast y
+\]
+once for the shared mean solve,
+\[
+A \beta_{k,\theta} = D F^\ast F D'_\theta F^\ast z_k
+\]
+for generic kernel hypers,
+and
+\[
+A \gamma_k = G v_k = D F^\ast F D v_k
+\]
+for the noise trace term.
+\[
+\text{generic kernel hypers } \to \text{ derivative-specific Hutchinson + CG},
+\]
+\[
+\sigma^2,\sigma_f^2 \to \text{ algebraic special cases using } \alpha \text{ and } T_1(\sigma^2).
+\]
+
+\end{document}

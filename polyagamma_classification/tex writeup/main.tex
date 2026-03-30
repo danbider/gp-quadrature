@@ -1,0 +1,701 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage[style=authoryear,backend=biber]{biblatex}
+\usepackage{hw}
+\newcommand{\Tr}{\operatorname{Tr}}
+
+\title{Polyagamma Augmentation in GP Classification using Equispaced Fourier Features}
+\author{Cole Citrenbaum}
+\date{May 2025}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents  % This generates the table of contents
+
+
+
+
+
+\section{Background}
+
+\subsection{GP setup}
+Assume $(x_i,y_i)\in \R^d \times \{0,1\}$ observations come from:
+$$
+y_i \mid f, x \sim \mathrm{Bern}\bigl(\sigma(f(x_i))\bigr)
+\quad\text{independently}$$
+$$f \sim GP(0, K_\theta),$$
+Our goal is to learn hyperparameters $\theta$, then compute the predictive mean and variance. \\
+Throughout we use our equispaced fourier feature basis $K \approx \Phi \Phi^* = FD^2F^*$.
+
+\subsection{Polyagamma Augmentation}
+Introduce auxiliary 
+$$\omega_i \sim PG(1,0)$$.
+Use two identities: \begin{enumerate}
+\item $\frac{(e^{u})^y}{(1+e^u)} = \frac{1}{2} \exp((y-\frac{1}{2})u) \int \exp(-\frac{1}{2} \omega u^2) PG(\omega| 1,0) d\omega $
+    \item $\exp\bigl[-\tfrac{1}{2}\,\omega\,c^2\bigr]\;PG(\omega\mid1,0)
+  \propto PG(\omega\mid 1,c)$%
+\end{enumerate}
+
+\begin{align}
+    p(y,f)
+    &= p(f)\prod_{i=1}^n \frac{1}{2}
+       \exp\bigl[(y_i - 1/2)\,f(x_i)\bigr]
+       \int \exp\Bigl[-\tfrac{1}{2}\,\omega_i\,f(x_i)^2\Bigr]\,
+       PG(\omega_i\mid 1,0)\,d\omega_i 
+    \\
+    &\implies
+    p(f,y,\omega)\;\propto\;
+    p(f)\,\prod_{i=1}^n
+      \exp\bigl[(y_i - 1/2)\,f(x_i)\bigr]
+      \exp\Bigl[-\tfrac{1}{2}\,\omega_i\,f(x_i)^2\Bigr]
+      PG(\omega_i\mid 1,0).\label{joint}
+\end{align}
+$$
+\boxed{\omega_i \mid f,y \sim PG(1,f(x_i)) \text{ independently}},$$
+
+$$
+\boxed{f\mid \omega,y \sim \mathcal{N}(m, V)},$$
+where 
+$$
+V = \bigl(K_{\theta}^{-1} + \Omega\bigr)^{-1},
+\quad
+m = V\,(\,y - \tfrac12\,).
+$$
+
+\section{E step}
+Fix Kernel hyperparameters $\theta$; update variational distribution $q(\omega,f)$.
+\subsection{Warmup; CAVI Updates}
+Use mean-field variational family; posit:
+$$
+q(\omega, f) = q(f)\,\prod_{i=1}^n q(\omega_i).
+$$
+
+Optimize $q$ via CAVI:
+
+\begin{enumerate} 
+\item First: \textbf{Fix} $q(\omega)$.
+\begin{align}
+  \arg\max_{q(f)}
+    \E_{q(f,\omega)}\log\frac{p(y,f,\omega)}{q(f,\omega)}
+  &=
+  \arg\max_{q(f)} \E_{q(f)}\,\E_{q(\omega)}
+    \log\frac{p(f\mid y,\omega)}{q(f)}
+  \\ 
+  &=
+  \arg\min_{q(f)} \mathrm{KL}\bigl(q(f)\,\|\,p(f\mid y,\,\E_{q(\omega)}[\omega])\bigr) \label{qf_exp}
+  \\
+  &=
+  \mathcal{N}\bigl(\,\Sigma\,(y-\tfrac12),\,(K_\theta^{-1} + \Lambda)^{-1}\bigr),
+\end{align}
+where $\Sigma=(K_\theta^{-1} + \Lambda)^{-1}$.  Ie, the solution is the posterior
+$p(f\mid y,\omega)$ evaluated at $\omega_i=\E_{q(\omega)}[\omega_i]$.  
+\footnote{Can also show with $\beta\sim N(0,I)$ that we could get
+  $q(\beta)=\mathcal N\bigl(m,\,(I+\Phi^*\Lambda\Phi)^{-1}\bigr)$.}
+
+We reach $\ref{qf_exp}$ because $\log p(f|y,\omega)$ is linear in $\omega$:
+\begin{align}
+  \log p(f(x)\mid y,\omega)
+  &=
+  -\tfrac12\,(f(x)-\Sigma(y-\tfrac12))^T\,\Sigma^{-1}\,(f(x)-\Sigma(y-\tfrac12))
+  + \mathrm{const}
+  \\
+  &=
+  -\tfrac12\,f(x)^T\,(K_\theta^{-1}+\Omega)\,f(x) + \dots
+\end{align}
+So
+$\E_{q(f)}\log p(f\mid y,\omega)=p\bigl(f\mid y,\E_q[\omega]\bigr)$.
+
+\item \textbf{Fix} $q(f)$.  Recall that we can write $PG(\omega_i | 1,c_i) = \exp(-\frac{1}{2} \omega_i c^2) PG(\omega_i|1,0)$. This property of PG yields:
+\begin{align}
+  \arg\min_{q(\omega)}
+    \E_{q(\omega)}\,\E_{q(f)}
+    \log\frac{PG(\omega_i\mid 1,f(x_i))}{q(\omega_i)}
+  &=
+  \arg\min_{q(\omega)} \mathrm{KL}\bigl(q(\omega)\,\|\,PG(\omega_i\mid1,c_i)\bigr),
+\end{align}
+where $c_i = \sqrt{\E_{q(f)} f(x_i)^2} = \sqrt{\Var_{q(f)}[f(x_i)] + \bigl(\E_{q(f)}[f(x_i)]\bigr)^2}$
+So we have
+$$
+q(\omega_i)=PG(\omega_i\mid 1,\,c_i),
+$$
+\end{enumerate}
+\subsection{CAVI Summary}
+$$
+\boxed{q(f)=\mathcal{N}(\mu,\Sigma)},\qquad
+\boxed{q(\omega_i)\sim PG(1,c_i)}
+$$
+where we’ve defined:
+\[
+c_i=\sqrt{\Var_{q(f)}[f(x_i)] + (\E_{q(f)}[f(x_i)])^2},\quad
+\Lambda=\diag\!\bigl(\E_q[\omega_i]\bigr)
+       =\diag\!\bigl(\tfrac{\tanh(c_i/2)}{2c_i}\bigr),
+\quad
+\Sigma=(K_\theta^{-1}+\Lambda)^{-1},
+\quad
+\mu=\Sigma(y-\tfrac12).
+\]
+\subsection{Natural Gradient Updates}
+Let’s assume no inducing points.
+
+Natural\footnote{Algorithm 3 in \url{https://arxiv.org/pdf/1711.06999}}
+parameters:
+$$
+\eta_1=\Sigma^{-1}\mu,\quad
+\eta_2=-\tfrac12\,\Sigma^{-1}.
+$$
+
+Supposing we work with minibatches $S$ with $s=|S|$, \href{https://arxiv.org/pdf/1802.06383}{Wenzel Eq 12} gives the natural gradient updates:
+
+\[
+\eta_1^{(t)}
+  \leftarrow(1-\rho_t)\,\eta_1^{(t-1)}
+    +\rho_t\,\tfrac{n}{s}\,\kappa_S^T\,(y_S-\tfrac12),
+\]
+\[
+\eta_2^{(t)}
+  \leftarrow(1-\rho_t)\,\eta_2^{(t-1)}
+    -\tfrac{\rho_t}{2}\bigl[K_\theta^{-1} + \tfrac{n}{s}\,\kappa_S^T \Lambda_S \kappa_S\bigr].
+\]
+
+
+
+If we don’t use sparse inducing points method, we get
+$$
+\kappa_S=K_{Sn}K_{nn}^{-1}=I_S\in\mathbb{R}^{s\times n}
+\quad\text{(row selectors),}
+$$
+yielding 
+\[
+\eta_1^{(t)}
+  \leftarrow(1-\rho_t)\,\eta_1^{(t-1)}
+    +\rho_t\,\tfrac{n}{s}\,I_S^T\,(y_S-\tfrac12),
+\]
+\[
+\eta_2^{(t)}
+  \leftarrow(1-\rho_t)\,\eta_2^{(t-1)}
+    -\tfrac{\rho_t}{2}\bigl[K_\theta^{-1} + \tfrac{n}{s}\,I_S^T \Lambda_S I_S\bigr].
+\]
+
+
+Now consider the $\eta_2$ update. Wenzel introduces $m$ inducing points, so that $\eta_2\in\mathbb R^{m\times m}$. However, for non-sparse GP ($m=n$), then storing and updating an $n\times n$ matrix is impractical. But for the $M$-step, all we have to store is how to apply $\Sigma$ The proposed solution is to first rewrite:
+
+
+\[
+-2\eta_2^{(t)} = \Sigma_{(t)}^{-1}
+  =K_{\theta^{(t)}}^{-1} + \Delta^{(t)}
+  \leftarrow
+  (1-\rho)\bigl(K_{\theta^{(t-1)}}^{-1}+\Delta^{(t-1)}\bigr)
+  +\rho\bigl(K_{\theta^{(t)}}^{-1}+\tfrac{n}{s}I_S^T\Lambda_S I_S\bigr),
+\]
+Instead of updating $\Sigma$, update:
+\[
+\Delta^{(t)}
+  \leftarrow (1-\rho)\,\Delta^{(t-1)}
+  +\rho\,\tfrac{n}{s}\,I_S^T\Lambda_S I_S.
+\]
+
+then either 
+
+\begin{enumerate}
+    \item Store the function:
+
+$$v\mapsto \Sigma^{-1}_{(t)} v = (1-\rho)K_{\theta^{(t-1)}}^{-1}v + \rho(K_{\theta^{(t)}}^{-1} v) + \Delta^{(t)}v,$$
+
+for use in the $M$-step. Or: \item Run enough updates of natural parameters before moving to the M-step that $(1-\rho)^k$ is negligible.\\
+Or: \item Simply "ignore" the old kernel; after M-step, reset $\Sigma^{(t-1)} = K^{-1}_{\theta^{(t)}} + \Delta^{(t-1)}$. 
+\end{enumerate}
+
+I think the last option is most practical, if it works. We avoid applying this convex mix of $K^{-1}$ operators in the M-step, which would be costly and confusing. Then since $\theta$ will be constant within the $E$-step, we can just update $\Delta$ and then store the apply $v\mapsto \Sigma_{(t)}^{-1}v = (K_\theta^{-1} + \Delta^{(t)})v$.
+
+
+
+
+\subsection{E step Summary}
+Alternate:
+\begin{enumerate}
+  \item Calculate $c_i$ using $\eta_2^{(t-1)},\eta_1^{(t-1)}$.
+  \item Update $\eta_1,\eta_2$ by storing diagonal $\Delta$ and doing batch coordinate ascent,
+
+\end{enumerate}
+\subsection{E‐step Computations}
+For each natural parameter update in the E-step, we need to compute $\Lambda=\diag(\E_q[\omega_i])=\diag\bigl(\tfrac{\tanh(c_i/2)}{2c_i}\bigr)$
+with
+\[
+c_i=\sqrt{\Var_q[f(x_i)] + (\E_q[f(x_i)])^2}.
+\]
+\begin{itemize}
+  \item $\Var_q[f(x_i)]=\Sigma_{ii}$.  Use that if $E[z_i z_j] = \delta_{ij}$, then $E[ z\odot (Az)] = diag(A)$. 
+  \item Applying $\alpha\mapsto(K^{-1}+\Delta)z$ and solving via CG+NUFFT
+    is the recurring computational bottleneck.
+\end{itemize}
+
+\subsection{Solving $z\mapsto \Sigma z$}
+Solve for $\alpha$:
+\textbf{Version 1: $n\times n$ system}
+\[
+\Sigma z=(K^{-1}+\Delta)^{-1}z=\alpha
+\;\iff\;
+(I + K\Delta)\,\alpha = K z
+\;\iff\;
+(I + FD^2 F^* \Delta)\,\alpha = FD^2 F^* z.
+\]
+\textbf{Version 2: $m\times m$ system}:
+
+\begin{align}
+(K^{-1} + \Delta) v = z &\iff (I + K\Delta)v = Kz\\
+&\iff (I + \Phi \Phi^* \Delta) v =  \Phi \Phi^*z \\
+&\iff (I+ \Phi \Phi^* \Delta) \Phi u = \Phi \Phi^* z\label{image}\\
+&\iff \Phi \left[ u + \Phi^* \Delta \Phi u\right] = \Phi\Phi^* z\\
+&\iff (I + \Phi^* \Delta \Phi) u =\Phi^* z \text{ solve for u} \label{cancel}\\
+&\text{ solve the above for $u$ and substitute } v = \Phi u.
+\end{align}
+Note that in \ref{image}, we can rearrange and see that $v \in \operatorname{Range}(\Phi)$. Also in \ref{cancel}, we can "cancel" the $\Phi$ on both sides since $\Phi$ is injective, since $\{\exp(i\omega_jx)\}_{j\in [M]}$ are linearly independent. 
+\begin{enumerate}
+  \item Each CG iteration requires two NUFFT applies of $I + DF^*\Delta FD$.
+  \item Plus two NUFFT setups.
+  \item We can speed up this solve by preconditioning with the approximation $\Delta = \delta I$ where $\delta$ is the mean of the $\Delta$ diagonal matrix. This cuts down computations dramatically if $\Delta$ is anywhere close to constant. Ie solve
+  $$(I + \bar{\delta} \Phi^* \Phi)u = \Phi^* z$$
+  In some arbitrary case I tested, from 100 CG solves down to 7. 
+  
+\end{enumerate}
+
+\section{M step}
+
+\subsection{Hyperparameter Updates}
+From Wenzel Eq 5 ie Eq \ref{joint}:
+\[
+\log p(y,\omega,f)
+  =\Bigl(\tfrac12\tilde y^T f - \tfrac12 f^T\Omega f\Bigr)
+   +\log p(f) + \log p(\omega) + \mathrm{const}.
+\]
+After $\E_q[\cdot]$, only the prior term depends on $\theta$:
+\begin{align}
+\frac{\partial}{\partial\theta}\mathcal{L}
+  &=\frac{\partial}{\partial\theta}
+    \E_q\log p(f)
+  \\
+  &=\frac{\partial}{\partial\theta}
+    \Bigl(
+      -\tfrac12\,\tr\bigl((\Sigma + \mu\mu^T)K^{-1}\bigr)
+      -\tfrac12\log|K|
+    \Bigr)
+  \\
+  &=\tfrac12\,\mu^T K^{-1}(\partial_\theta K)\,K^{-1}\mu
+    +\tfrac12\,\tr\bigl(\Sigma\,K^{-1}(\partial_\theta K)\,K^{-1}\bigr)
+    -\tfrac12\,\tr\bigl(K^{-1}\partial_\theta K\bigr)\\
+    & = I + II + III.
+\end{align}
+
+\subsection{Term 1}
+Let $v=K^{-1}\mu$.  Then
+\begin{align}
+  Kv &=\mu
+  \;\implies\;
+  FD^2F^*\,v=\mu
+  \;\implies\;
+  F^*FD^2\,\beta=F^*\mu,
+  \quad \text{ where } \beta=F^*v,
+  \\
+  &\implies\;\text{solve Toeplitz }(F^*FD^2)\,\beta=F^*\mu,
+\end{align}
+
+So the first term becomes
+\[
+\mu^T K^{-1}(\partial_\theta K)\,K^{-1}\mu
+  =\bigl\langle \beta,\,D'\beta\bigr\rangle.
+\]
+
+\subsection{Term 2}
+\[
+II\approx \frac1J\sum_{j=1}^J
+  z_j^T\,(K^{-1}+\Delta^{(t)})^{-1}K^{-1}FD'F^*\,K^{-1}z_j.
+\]
+\begin{itemize}
+  \item Compute $F^*K^{-1}z$ as in Term 1.
+  \item Then solve $z^T \Sigma$:
+  \begin{itemize}
+  \item Solved the same system in E-step, but with $\Sigma_{(t-1)}$, would like to reuse this somehow
+
+  \end{itemize}
+\end{itemize}
+
+\subsection{Term 3}
+\[
+III\approx \frac1J\sum_{j=1}^J
+  z_j^T\,FD'F^*\,K^{-1}z_j,
+\]
+Like term $I$, this reduces to calculating one NUFFT after computing $F^*K^{-1}z$.
+
+\subsection{ Summary}
+\begin{itemize}
+  \item The bottleneck is applying $\Sigma v=(K^{-1}+\Delta^{(t)})v$, which costs 2 NUFFT.
+\end{itemize}
+
+\section{Revised M Step}
+Use Woodbury inversion Lemma to get:
+
+$$\Sigma = (K^{-1} + \Delta)^{-1} = K - K(I + \Delta K)^{-1} \Delta K.$$
+
+Hence we have the identity:
+
+$$K^{-1} \Sigma K^{-1} = K^{-1} - (I+\Delta K)^{-1} \Delta.$$
+\begin{align}
+\frac{\partial}{\partial\theta}\mathcal{L}
+  &=\frac{\partial}{\partial\theta}
+    \E_q\log p(f)
+  \\
+  &=\frac{\partial}{\partial\theta}
+    \Bigl(
+      -\tfrac12\,\tr\bigl((\Sigma + \mu\mu^T)K^{-1}\bigr)
+      -\tfrac12\log|K|
+    \Bigr)
+  \\
+  &=\tfrac12\,\mu^T K^{-1}(\partial_\theta K)\,K^{-1}\mu
+    +\tfrac12\,\tr\bigl(\Sigma\,K^{-1}(\partial_\theta K)\,K^{-1}\bigr)
+    -\tfrac12\,\tr\bigl(K^{-1}\partial_\theta K\bigr)\\
+    & = I + II + III.
+\end{align}
+
+Cycling the traces:
+\begin{align}\tfrac12\,\tr\bigl(\Sigma\,K^{-1}(\partial_\theta K)\,K^{-1}\bigr)&= \tfrac12\,\tr\bigl(K^{-1}\Sigma\,K^{-1}(\partial_\theta K)\bigr)\\
+& = \frac{1}{2}\tr (K^{-1} \partial_\theta K) - \frac{1}{2} \tr ((I+\Delta K)^{-1} \Delta \partial_\theta K)
+\end{align}
+
+Hence we can cancel the third term and write:
+
+\begin{align}\frac{\partial}{\partial \theta} \mathcal L &= I -\frac{1}{2} \tr((I+ \Delta K)^{-1} \Delta \partial_\theta K).\\
+& = I - \frac{1}{2}\tr(\Delta FD'F^* (I+\Delta K)^{-1})
+\end{align}
+
+This is an improvement over before since that inverse is well-conditioned. The idea to solve it efficiently is to approximate $\Delta$ as constant times identity. Let $\alpha := (I+\Delta K)^{-1} z.$ Then     $z = (I + \Delta FD^2)F^* \alpha$ and:
+
+
+\begin{align}
+    F^* z &= (I+ F^* \Delta FD^2) F^* \alpha \\
+    &\approx (I + \bar \delta TD^2) F^* \alpha.
+\end{align}
+
+Solve the second system using Toeplitz machinery, then warm start the above system--should only take a  few iterations to converge with this warm start. 
+
+\\\\
+
+
+Note actualy best to solve 
+
+\begin{align}
+    (I + F^* \Omega F D^2 ) F^* \alpha = F^* z \\
+    &\implies (I+ DF^* \Omega FD)DF^* \alpha = DF^*z
+\end{align}
+so that we have a hermitian system and cg works better. 
+
+
+
+\section{Predictive mean}
+As in Wenzel:
+
+\begin{align}
+    p(f_*|y) &= \int p(f_*|f) p(f|y) df\\
+    & \approx \int p(f_*|f) q(f) df\\
+    & = N(f_*|\mu_*, \sigma_*^2),
+\end{align}
+where it is clearer to work in feature space. Let
+\[
+\Psi := FD,
+\qquad
+K=\Psi\Psi^*=FD^2F^*,
+\qquad
+\kappa := y-\tfrac12,
+\qquad
+B := \Psi^*\Delta \Psi = D F^* \Delta F D.
+\]
+Here:
+\[
+F\in \mathbb C^{n\times M}
+\]
+is the Fourier / NUFFT feature matrix at the training inputs,
+\[
+D=\diag(ws)\in\mathbb R^{M\times M}
+\]
+is the diagonal matrix of spectral weights, and
+\[
+\Delta=\diag(\delta)\in\mathbb R^{n\times n}
+\]
+is the diagonal PolyGamma variational parameter matrix.
+The Gaussian variational factor is
+\[
+q(f)=N(\mu,\Sigma),
+\qquad
+\Sigma=(K^{-1}+\Delta)^{-1},
+\qquad
+\mu = \Sigma \kappa.
+\]
+Now define the feature-space mean coefficients by
+\[
+m_u := (I+B)^{-1}\Psi^* \kappa \in \mathbb C^M,
+\]
+and the candidate training-location mean
+\[
+\tilde{\mu} := \Psi m_u.
+\]
+We now show that $\tilde{\mu}=\mu$.
+First,
+\[
+\mu
+  = (K^{-1}+\Delta)^{-1}\kappa.
+\]
+Using
+\[
+(K^{-1}+\Delta)^{-1}=(I+K\Delta)^{-1}K,
+\]
+we get
+\[
+\mu = (I+K\Delta)^{-1}K\kappa.
+\]
+Next, since $K=\Psi\Psi^*$ and
+\[
+(I+AB)^{-1}A = A(I+BA)^{-1},
+\]
+with
+\[
+A=\Psi,
+\qquad
+B=\Psi^*\Delta,
+\]
+we obtain
+\[
+(I+K\Delta)^{-1}\Psi
+  =
+  (I+\Psi\Psi^*\Delta)^{-1}\Psi
+  =
+  \Psi(I+\Psi^*\Delta\Psi)^{-1}.
+\]
+Therefore
+\[
+(I+K\Delta)^{-1}K
+  =
+  (I+K\Delta)^{-1}\Psi\Psi^*
+  =
+  \Psi(I+\Psi^*\Delta\Psi)^{-1}\Psi^*
+  =
+  \Psi(I+B)^{-1}\Psi^*.
+\]
+Substituting this into the expression for $\mu$ gives
+\[
+\mu
+  =
+  \Psi(I+B)^{-1}\Psi^*\kappa
+  =
+  \Psi m_u
+  =
+  \tilde{\mu}.
+\]
+Hence the posterior mean at the training locations is indeed
+\[
+\mu = \Psi m_u.
+\]
+
+Equivalently, the posterior mean satisfies
+\[
+\left(K^{-1}+\Delta\right)\mu=\kappa,
+\qquad
+K^{-1}\mu = \kappa-\Delta\mu.
+\]
+Applying $\Psi^*$ gives
+\[
+\Psi^*K^{-1}\mu = \Psi^*(\kappa-\Delta\mu).
+\]
+Since $\mu=\Psi m_u$, this becomes
+\[
+\Psi^*K^{-1}\mu = \Psi^*\kappa-\Psi^*\Delta\Psi m_u.
+\]
+But from
+\[
+(I+B)m_u=\Psi^*\kappa,
+\]
+we also have
+\[
+m_u = \Psi^*\kappa-\Psi^*\Delta\Psi m_u.
+\]
+Comparing the last two displays shows that
+\[
+m_u = \Psi^*K^{-1}\mu.
+\]
+Multiplying by $D^{-1}$ and using $\Psi=FD$ yields the equivalent relation
+\[
+\beta^{(1)} := F^*K^{-1}\mu,
+\qquad
+m_u = D\beta^{(1)}.
+\]
+
+For a new point $x_*$, define the unweighted Fourier row
+\[
+(\varphi_*)_j
+  :=
+  \exp(2\pi i \langle \xi_j, x_*\rangle),
+  \qquad j\in[M],
+\]
+and the weighted feature vector
+\[
+(\psi_*)_j
+  :=
+  \sqrt{h^d \hat{k}(\xi_j)}\,
+  \exp(2\pi i \langle \xi_j, x_*\rangle),
+  \qquad j\in[M].
+\]
+Equivalently,
+\[
+\psi_* = D\varphi_*.
+\]
+The cross-covariance vector between the training inputs and $x_*$ is
+\[
+k_* := K(X,x_*) = \Psi\psi_* = FD^2\varphi_*.
+\]
+Then the predictive latent mean is
+\[
+\mu_*
+  = \E[f_*|y]
+  \approx k_*^T K^{-1}\mu.
+\]
+Using the identities above,
+\begin{align}
+\mu_*
+  &= k_*^T K^{-1}\mu\\
+  &= \psi_*^* \Psi^* K^{-1}\mu\\
+  &= \psi_*^* m_u.
+\end{align}
+Hence
+\[
+\boxed{
+\mu_* = \psi_*^* m_u.
+}
+\]
+The important point is that this is \emph{not} obtained by directly simplifying
+\[
+DF^*(FD^2F^*)^{-1}FD.
+\]
+Instead, the simplification comes from the push-through identity above, together with the feature-space solve defining $m_u$.
+
+To connect back to Term 1 in the M-step, define
+\[
+\beta^{(1)} := F^*K^{-1}\mu,
+\]
+Therefore
+\[
+\mu_* = \varphi_*^* D m_u = \varphi_*^* D^2 \beta^{(1)}.
+\]
+In practice, for a batch of test locations this is a single Type-2 NUFFT.
+
+\section{Predictive variance}
+Starting from the conditional GP variance formula and integrating against
+$q(f)=N(\mu,\Sigma)$ gives
+\[
+\sigma_*^2
+  =
+  k_{**}
+  - k_*^T K^{-1}k_*
+  + k_*^T K^{-1}\Sigma K^{-1}k_*.
+\]
+Using the revised M-step identity
+\[
+K^{-1}\Sigma K^{-1}
+  =
+  K^{-1} - (I+\Delta K)^{-1}\Delta,
+\]
+the $K^{-1}$ terms cancel, so
+\[
+\boxed{
+\sigma_*^2
+  =
+  k_{**}
+  - k_*^T (I+\Delta K)^{-1}\Delta k_*.
+}
+\]
+Thus we never need to store or apply $K^{-1}$ explicitly.
+
+In the feature notation above, let
+\[
+S_u := (I+B)^{-1}.
+\]
+Since $\Sigma = \Psi S_u \Psi^*$, the predictive variance can be written as
+\[
+\boxed{
+\sigma_*^2
+  =
+  \psi_*^* S_u \psi_*
+  =
+  \psi_*^*(I+B)^{-1}\psi_*.
+}
+\]
+So predictive variances reuse the same Hermitian operator
+$I + D F^* \Delta F D$ as the revised M-step: for each test point, solve
+\[
+(I+B)u_* = \psi_*,
+\]
+then compute
+\[
+\sigma_*^2 = \psi_*^* u_*.
+\]
+For a batch of test points, solve these systems simultaneously with batched CG.
+
+Finally, the predictive class probability is
+\[
+p(y_* = 1|y)
+  =
+  \int \sigma(f_*)\,p(f_*|y)\,df_*
+  \approx
+  \int \sigma(f_*)\,N(f_*|\mu_*,\sigma_*^2)\,df_*,
+\]
+which is a one-dimensional integral. One may evaluate it by quadrature, or use the same approximation as at the training points:
+\[
+p(y_* = 1|y)
+  \approx
+  \sigma\!\left(
+    \frac{\mu_*}{\sqrt{1+\pi\sigma_*^2/8}}
+  \right).
+\]
+
+\section{Summary}
+We can learn hyperparameters, compute predictive means in $\calO(n + M\log M)$, but the cost of applying $K^{-1} + \Delta$ will give a larger constant than in the conjugate case, since we must rely on NUFFT in conjugate gradient solves, rather than the Toeplitz operation. \\
+\section{Thoughts moving forward}
+\begin{enumerate}
+    \item Avoiding $\Sigma v$ matvec where $\Sigma\in \R^{n\times n}$
+    \item Maybe try with sparse inducing points instead of $m=n$ so that $\Sigma\in \R^{m\times m}$
+    \begin{itemize}
+        \item Ie exactly Wenzel's procedure, just with truncated features.
+    \end{itemize}
+\end{enumerate}
+
+\section{Results}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.75\linewidth]{bias_gradient.png}
+    \caption{Biased Gradients?}
+    \label{fig:grad-bias}
+\end{figure}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.75\linewidth]{PG_vanillacomparison.png}
+    \caption{Un-biased Gradients?}
+    \label{fig:grad-bias}
+\end{figure}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.75\linewidth]{PG_convergence.png}
+    \caption{Convergence}
+    \label{fig:grad-bias}
+\end{figure}
+
+
+For $d=1$, fine and stable. 
+
+Operators and numerical instability:
+\begin{itemize}
+\item Seems like solving $DF^*F D \alpha= DF^*z$ for $\alpha$ is better in large length scale regime, 
+\item But solving 
+$F^*F \beta = F^* v$ for $\beta$ then $\alpha = D^{-2} \beta$ is better in small length scale. 
+\end{itemize}
+
+
+\end{document}

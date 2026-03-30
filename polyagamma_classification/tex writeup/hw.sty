@@ -1,0 +1,462 @@
+\usepackage{amsmath,amsthm,amssymb}
+\usepackage{mathtools,xspace}
+\usepackage{amsfonts}
+\usepackage{bbm}
+\usepackage{paralist}
+
+\usepackage{ifxetex} % <-- if you have trouble compiling, try commenting this line out
+
+% ------ adjust section header font size ------
+\usepackage{titlesec}
+\titleformat*{\section}{\large\bfseries}
+
+%------- title page header -------------
+\usepackage{titling}
+% \renewcommand\maketitlehooka{
+% 	\setlength\parindent{0pt}
+% 	\begin{minipage}{0.6\textwidth}
+% % STATS 300B: Theory of Statistics II\par
+% % Instructor: Tselil Schramm \par
+% 	\end{minipage}
+% 	\begin{minipage}{0.39\textwidth}
+% \raggedleft
+% % Homework \hwnumber\par
+% % Due: \duedate \par
+% \end{minipage}
+% \vskip 2.5ex
+% \par
+% \hrule
+% \vskip 5 ex
+% }
+
+%\pretitle{}
+\posttitle{\par\end{center}}
+\preauthor{}
+\postauthor{}
+\predate{}
+\postdate{}
+\setlength{\droptitle}{-15ex}
+%---------------------------
+
+\usepackage[pagebackref]{hyperref}
+
+\usepackage[dvipsnames]{xcolor}
+\hypersetup{
+colorlinks=true,
+urlcolor=blue,
+linkcolor=blue,
+citecolor=OliveGreen,
+}
+\usepackage{ulem}
+\usepackage{tcolorbox}
+\usepackage{enumerate}
+\usepackage{enumitem}
+\usepackage{multirow}
+
+\ifxetex
+\usepackage[bigdelims,vvarbb]{newpxmath}
+\usepackage{mathspec}
+\setallmainfonts(Digits,Latin){Noto Serif}
+\else
+\usepackage{libertine}
+\usepackage{libertinust1math}
+\usepackage[T1]{fontenc}
+\fi
+
+\usepackage{bm}
+\usepackage{csquotes}
+\allowdisplaybreaks
+
+
+\newcommand\numberthis{\addtocounter{equation}{1}\tag{\theequation}}
+
+
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem*{theorem*}{Theorem}
+\newtheorem{itheorem}{Theorem}
+
+\newtheorem{subclaim}{Claim}[theorem]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem*{proposition*}{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem*{lemma*}{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem*{conjecture*}{Conjecture}
+\newtheorem{fact}[theorem]{Fact}
+\newtheorem*{fact*}{Fact}
+\newtheorem{exercise}[theorem]{Exercise}
+\newtheorem*{exercise*}{Exercise}
+\newtheorem{hypothesis}[theorem]{Hypothesis}
+\newtheorem*{hypothesis*}{Hypothesis}
+\newtheorem{conjecture}[theorem]{Conjecture}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{construction}[theorem]{Construction}
+\newtheorem{example}[theorem]{Example}
+\newtheorem{question}[theorem]{Question}
+\newtheorem{openquestion}[theorem]{Open Question}
+\newtheorem{algorithm}[theorem]{Algorithm}
+\newtheorem{problem}[theorem]{Problem}
+\newtheorem{protocol}[theorem]{Protocol}
+\newtheorem{assumption}[theorem]{Assumption}
+\newtheorem{exercise-easy}[theorem]{Exercise}
+\newtheorem{exercise-med}[theorem]{Exercise}
+\newtheorem{exercise-hard}[theorem]{Exercise$^\star$}
+\newtheorem{claim}[theorem]{Claim}
+\newtheorem*{claim*}{Claim}
+
+\newtheorem{remark}[theorem]{Remark}
+\newtheorem*{remark*}{Remark}
+\newtheorem{observation}[theorem]{Observation}
+\newtheorem*{observation*}{Observation}
+
+%
+%
+
+\usepackage{prettyref}
+% prettyref stuff
+\newcommand{\savehyperref}[2]{\texorpdfstring{\hyperref[#1]{#2}}{#2}}
+
+\newrefformat{eq}{\savehyperref{#1}{\textup{(\ref*{#1})}}}
+\newrefformat{ineq}{\savehyperref{#1}{\textup{(\ref*{#1})}}}
+\newrefformat{eqn}{\savehyperref{#1}{\textup{(\ref*{#1})}}}
+\newrefformat{lem}{\savehyperref{#1}{Lemma~\ref*{#1}}}
+\newrefformat{def}{\savehyperref{#1}{Definition~\ref*{#1}}}
+\newrefformat{thm}{\savehyperref{#1}{Theorem~\ref*{#1}}}
+\newrefformat{cor}{\savehyperref{#1}{Corollary~\ref*{#1}}}
+\newrefformat{cha}{\savehyperref{#1}{Chapter~\ref*{#1}}}
+\newrefformat{sec}{\savehyperref{#1}{Section~\ref*{#1}}}
+\newrefformat{app}{\savehyperref{#1}{Appendix~\ref*{#1}}}
+\newrefformat{tab}{\savehyperref{#1}{Table~\ref*{#1}}}
+\newrefformat{fig}{\savehyperref{#1}{Figure~\ref*{#1}}}
+\newrefformat{hyp}{\savehyperref{#1}{Hypothesis~\ref*{#1}}}
+\newrefformat{alg}{\savehyperref{#1}{Algorithm~\ref*{#1}}}
+\newrefformat{rem}{\savehyperref{#1}{Remark~\ref*{#1}}}
+\newrefformat{item}{\savehyperref{#1}{Item~\ref*{#1}}}
+\newrefformat{step}{\savehyperref{#1}{step~\ref*{#1}}}
+\newrefformat{conj}{\savehyperref{#1}{Conjecture~\ref*{#1}}}
+\newrefformat{fact}{\savehyperref{#1}{Fact~\ref*{#1}}}
+\newrefformat{prop}{\savehyperref{#1}{Proposition~\ref*{#1}}}
+\newrefformat{prob}{\savehyperref{#1}{Problem~\ref*{#1}}}
+\newrefformat{claim}{\savehyperref{#1}{Claim~\ref*{#1}}}
+\newrefformat{relax}{\savehyperref{#1}{Relaxation~\ref*{#1}}}
+\newrefformat{rem}{\savehyperref{#1}{Remark~\ref*{#1}}}
+\newrefformat{red}{\savehyperref{#1}{Reduction~\ref*{#1}}}
+\newrefformat{part}{\savehyperref{#1}{Part~\ref*{#1}}}
+\newrefformat{ex}{\savehyperref{#1}{Exercise~\ref*{#1}}}
+\newrefformat{property}{\savehyperref{#1}{Property~\ref*{#1}}}
+\newrefformat{type}{\savehyperref{#1}{Type~\ref*{#1}}}
+\newrefformat{eg}{\savehyperref{#1}{Example~\ref*{#1}}}
+\newrefformat{obs}{\savehyperref{#1}{Observation~\ref*{#1}}}
+
+%
+%
+\newcommand{\Sref}[1]{\hyperref[#1]{\S\ref*{#1}}}
+
+\let\pref=\prettyref
+
+
+% \usepackage{parskip}
+
+\usepackage[
+letterpaper,
+top=1in,
+bottom=1in,
+left=1in,
+right=1in]{geometry}
+\linespread{1.08}
+
+\newcommand\whichfont{0}
+% Probability stuff
+\ifnum\whichfont=1
+\renewcommand{\Pr}{\boldsymbol{\mathrm{Pr}}}
+\newcommand{\Cov}{\boldsymbol{\mathrm{Cov}}}
+\newcommand{\E}{\boldsymbol{\mathrm{E}}}
+\newcommand{\Var}{\boldsymbol{\mathrm{Var}}}
+\newcommand{\pE}{\widetilde{\boldsymbol{\mathrm{E}}}}
+\else
+\renewcommand{\Pr}{\mathbf{Pr}}
+\newcommand{\Cov}{\mathbf{Cov}}
+\newcommand{\E}{\mathbf{E}}
+\newcommand{\Var}{\mathbf{Var}}
+\newcommand{\pE}{\widetilde{\mathbf{E}}}
+\fi
+
+% miscellaneous shortcuts
+\newcommand{\Ind}{\boldsymbol{1}}
+\newcommand{\supp}{\mathrm{supp}}
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\diag}{\operatorname{diag}}
+
+\newcommand{\lam}{\lambda}
+\newcommand{\dleta}{\delta}
+\newcommand{\simga}{\sigma}
+\newcommand{\vphi}{\varphi}
+\newcommand{\la}{\langle}
+\newcommand{\ra}{\rangle}
+\newcommand{\wt}[1]{\widetilde{#1}}
+\newcommand{\wh}[1]{\widehat{#1}}
+\newcommand{\ol}[1]{\overline{#1}}
+\newcommand{\ul}[1]{\underline{#1}}
+\newcommand{\ot}{\otimes}
+\newcommand{\zo}{\{0,1\}}
+\newcommand{\co}{:}                       %\newcommand{\co}{\colon}
+\newcommand{\bdry}{\partial}
+\newcommand{\grad}{\nabla}
+\newcommand{\symmdiff}{\triangle} \newcommand{\symdiff}{\symmdiff}
+\newcommand{\half}{\tfrac{1}{2}}
+
+
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+% better looking epsilon
+\newcommand{\eps}{\varepsilon}
+
+\newcommand{\calA}{\mathcal A}
+\newcommand{\calB}{\mathcal B}
+\newcommand{\calC}{\mathcal C}
+\newcommand{\calD}{\mathcal D}
+\newcommand{\calE}{\mathcal E}
+\newcommand{\calF}{\mathcal F}
+\newcommand{\calG}{\mathcal G}
+\newcommand{\calH}{\mathcal H}
+\newcommand{\calI}{\mathcal I}
+\newcommand{\calJ}{\mathcal J}
+\newcommand{\calK}{\mathcal K}
+\newcommand{\calL}{\mathcal L}
+\newcommand{\calM}{\mathcal M}
+\newcommand{\calN}{\mathcal N}
+\newcommand{\calO}{\mathcal O}
+\newcommand{\calP}{\mathcal P}
+\newcommand{\calQ}{\mathcal Q}
+\newcommand{\calR}{\mathcal R}
+\newcommand{\calS}{\mathcal S}
+\newcommand{\calT}{\mathcal T}
+\newcommand{\calU}{\mathcal U}
+\newcommand{\calV}{\mathcal V}
+\newcommand{\calW}{\mathcal W}
+\newcommand{\calX}{\mathcal X}
+\newcommand{\calY}{\mathcal Y}
+\newcommand{\calZ}{\mathcal Z}
+
+\newcommand{\bbB}{\mathbb B}
+\newcommand{\bbS}{\mathbb S}
+\newcommand{\bbR}{\mathbb R}
+\newcommand{\bbZ}{\mathbb Z}
+\newcommand{\bbI}{\mathbb I}
+\newcommand{\bbQ}{\mathbb Q}
+\newcommand{\bbP}{\mathbb P}
+\newcommand{\bbE}{\mathbb E}
+
+% number systems
+\newcommand{\R}{\mathbb R}
+\newcommand{\C}{\mathbb C}
+\newcommand{\N}{\mathbb N}
+\newcommand{\Z}{\mathbb Z}
+\newcommand{\F}{\mathbb F}
+\newcommand{\Q}{\mathbb Q}
+
+\newcommand{\bone}{\boldsymbol{1}}
+\newcommand{\balpha}{\boldsymbol{\alpha}}
+\newcommand{\bbeta}{\boldsymbol{\beta}}
+\newcommand{\bdelta}{\boldsymbol{\delta}}
+\newcommand{\bepsilon}{\boldsymbol{\epsilon}}
+\newcommand{\blambda}{\boldsymbol{\lambda}}
+\newcommand{\bomega}{\boldsymbol{\omega}}
+\newcommand{\bpi}{\boldsymbol{\pi}}
+\newcommand{\bnu}{\boldsymbol{\nu}}
+\newcommand{\bphi}{\boldsymbol{\phi}}
+\newcommand{\bvphi}{\boldsymbol{\varphi}}
+\newcommand{\bpsi}{\boldsymbol{\psi}}
+\newcommand{\bsigma}{\boldsymbol{\sigma}}
+\newcommand{\btheta}{\boldsymbol{\theta}}
+\newcommand{\bzeta}{\boldsymbol{\zeta}}
+\newcommand{\bxi}{\boldsymbol{\xi}}
+\newcommand{\ba}{\boldsymbol{a}}
+\newcommand{\bb}{\boldsymbol{b}}
+\newcommand{\bc}{\boldsymbol{c}}
+\newcommand{\bd}{\boldsymbol{d}}
+\newcommand{\be}{\boldsymbol{e}}
+\newcommand{\boldf}{\boldsymbol{f}}
+\newcommand{\bg}{\boldsymbol{g}}
+\newcommand{\bh}{\boldsymbol{h}}
+\newcommand{\bi}{\boldsymbol{i}}
+\newcommand{\bj}{\boldsymbol{j}}
+\newcommand{\bk}{\boldsymbol{k}}
+\newcommand{\bell}{\boldsymbol{\ell}}
+\newcommand{\bp}{\boldsymbol{p}}
+\newcommand{\br}{\boldsymbol{r}}
+\newcommand{\bs}{\boldsymbol{s}}
+\newcommand{\bt}{\boldsymbol{t}}
+\newcommand{\bu}{\boldsymbol{u}}
+\newcommand{\bv}{\boldsymbol{v}}
+\newcommand{\bw}{\boldsymbol{w}}
+\newcommand{\bx}{{\boldsymbol{x}}}
+\newcommand{\by}{\boldsymbol{y}}
+\newcommand{\bz}{\boldsymbol{z}}
+\newcommand{\bA}{\boldsymbol{A}}
+\newcommand{\bB}{\boldsymbol{B}}
+\newcommand{\bC}{\boldsymbol{C}}
+\newcommand{\bD}{\boldsymbol{D}}
+\newcommand{\bE}{\boldsymbol{E}}
+\newcommand{\bF}{\boldsymbol{F}}
+\newcommand{\bG}{\boldsymbol{G}}
+\newcommand{\bH}{\boldsymbol{H}}
+\newcommand{\bI}{\boldsymbol{I}}
+\newcommand{\bJ}{\boldsymbol{J}}
+\newcommand{\bL}{\boldsymbol{L}}
+\newcommand{\bM}{\boldsymbol{M}}
+\newcommand{\bP}{\boldsymbol{P}}
+\newcommand{\bQ}{\boldsymbol{Q}}
+\newcommand{\bR}{\boldsymbol{R}}
+\newcommand{\bS}{\boldsymbol{S}}
+\newcommand{\bT}{\boldsymbol{T}}
+\newcommand{\bU}{\boldsymbol{U}}
+\newcommand{\bV}{\boldsymbol{V}}
+\newcommand{\bW}{\boldsymbol{W}}
+\newcommand{\bX}{\boldsymbol{X}}
+\newcommand{\bY}{\boldsymbol{Y}}
+\newcommand{\bZ}{\boldsymbol{Z}}
+
+% bold calligraphic
+\newcommand{\bcalG}{\boldsymbol{\calG}} \newcommand{\calbG}{\bcalG}
+\newcommand{\bcalH}{\boldsymbol{\calH}}
+\newcommand{\bcalI}{\boldsymbol{\calI}}
+\newcommand{\bcalK}{\boldsymbol{\calK}}
+\newcommand{\bcalX}{\boldsymbol{\calX}} \newcommand{\calbX}{\bcalX}
+\newcommand{\bcalY}{\boldsymbol{\calY}} \newcommand{\calbY}{\bcalY}
+\newcommand{\bcalZ}{\boldsymbol{\calZ}} \newcommand{\calbZ}{\bcalZ}
+\newcommand{\bcalQ}{\boldsymbol{\calQ}}
+
+
+\renewcommand{\le}{\leqslant}
+\renewcommand{\leq}{\leqslant}
+\renewcommand{\ge}{\geqslant}
+\renewcommand{\geq}{\geqslant}
+
+\newcommand{\psdge}{\succeq}
+\newcommand{\psdg}{\succ}
+\newcommand{\psdle}{\preceq}
+\newcommand{\psdl}{\prec}
+
+
+\DeclarePairedDelimiter\parens{\lparen}{\rparen}
+\DeclarePairedDelimiter\abs{\lvert}{\rvert}
+\DeclarePairedDelimiter\norm{\lVert}{\rVert}
+\DeclarePairedDelimiter\floor{\lfloor}{\rfloor}
+\DeclarePairedDelimiter\ceil{\lceil}{\rceil}
+\DeclarePairedDelimiter\braces{\lbrace}{\rbrace}
+\DeclarePairedDelimiter\bracks{\lbrack}{\rbrack}
+\DeclarePairedDelimiter\angles{\langle}{\rangle}
+
+\newcommand{\rv}[1]{\boldsymbol{#1}}
+\newcommand{\bbone}{\mathbbm 1}
+\newcommand{\Id}{\mathbb{I}}
+
+\renewcommand{\emph}{\textit}
+\renewcommand{\em}{\it}
+
+% Pedro's macros
+
+\usepackage{bm}
+
+\usepackage{subcaption}
+\usepackage{graphicx}
+\graphicspath{{images/}}
+
+\newcommand{\expt}[1]{\text{\textbf{E}} \left [ #1 \right ]}
+\newcommand{\vart}[1]{\text{\textbf{Var}} \left [ #1 \right ]}
+\newcommand{\prob}[1]{\text{\textbf{Pr}} \left [ #1 \right ]}
+%\newcommand{\tr}[1]{\mathrm{tr} \left ( #1 \right )}
+\newcommand{\littleO}[1]{o(#1)}
+\newcommand{\bigO}[1]{\mathcal{O}(#1)}
+\newcommand{\bigOmega}[1]{\Omega(#1)}
+\newcommand{\bigOmegaT}[1]{\widetilde\Omega(#1)}
+\newcommand{\bigTheta}[1]{\Theta(#1)}
+
+\newcommand{\pvec}[1]{\vec{#1}\mkern2mu\vphantom{#1}}
+
+\usepackage{tikz}
+
+\newcommand{\iprod}[1]{\langle #1 \rangle}
+
+\newcommand*\pluscircpic{
+	\begin{tikzpicture}
+		\node[draw,circle,inner sep=0pt,scale=3]{};
+		\node[inner sep=0pt]{\textnormal{+}};
+	\end{tikzpicture}
+}
+\newcommand{\pluscirc}{\mathbin{\text{\pluscircpic}}}
+
+\newcommand{\avg}{\mathop{\mathrm{avg}}}
+
+\newcommand{\eigs}{\mathrm{eigs}}
+\newcommand{\tails}{\mathrm{Tails}}
+\newcommand{\notails}{\mathrm{NoTails}}
+\newcommand{\Simple}{\mathrm{Simple}}
+
+\newcommand{\maxcut}{\mathsf{Max\text{-}Cut}}
+\newcommand{\naethree}{\mathsf{NAE\text{-}3SAT}}
+\newcommand{\threesat}{\mathsf{3SAT}}
+\newcommand{\twoxor}{\mathsf{2XOR}}
+\newcommand{\ksat}{\mathsf{kSAT}}
+\newcommand{\kxor}{\mathsf{kXOR}}
+\newcommand{\SORT}{\mathsf{Sort}} \newcommand{\Sort}{\SORT} \newcommand{\sort}{\SORT}
+\newcommand{\chsh}{\mathsf{CHSH}} \newcommand{\CHSH}{\chsh}
+\newcommand{\forrelation}{\mathsf{Forrelation}} \newcommand{\Forrelation}{\forrelation}
+
+\newcommand{\SDP}{\mathrm{SDP}}
+\newcommand{\EIG}{\mathrm{EIG}}
+\newcommand{\addprod}{\pluscirc}
+\newcommand{\specrad}{\rho}
+\newcommand{\spec}{\mathrm{Spec}}
+\newcommand{\permissible}{nomadic\xspace}
+\newcommand{\weight}{\mathrm{wt}}
+\newcommand{\Wt}{\mathrm{wt}}
+\newcommand{\Atom}{\mathrm{Atom}}
+\newcommand{\Atoms}{\mathrm{Atoms}}
+
+\newcommand{\congraph}{\calH}
+\newcommand{\instgraph}{\calI}
+\newcommand{\bcongraph}{\bcalH}
+\newcommand{\binstgraph}{\bcalI}
+\newcommand{\atomlist}{\calA}
+\newcommand{\indepset}{\mathsf{IndependentSet}}
+\newcommand{\gr}{\alpha_{\mathrm{gr}}}
+
+\newcommand{\Enc}{\mathrm{Enc}}
+\newcommand{\fresh}{\mathrm{fresh}}
+\newcommand{\visited}{\mathrm{visited}}
+\newcommand{\stale}{\mathrm{stale}}
+\newcommand{\boundary}{\mathrm{boundary}}
+
+\newcommand{\NP}{\mathsf{NP}}
+
+\newcommand{\poly}{\mathrm{poly}}
+\newcommand{\defeq}{:=}
+
+\newcommand{\myfig}[4]{\begin{figure}[h] \centering \includegraphics[width=#1\textwidth]{#2} \caption{#3} \label{#4} \end{figure}}
+
+
+\newcommand{\hint}[1]{{\emph{\footnotesize{Hint: #1}}}}
+
+\ifnum\solutionson=1
+	\newcommand{\solution}[1]{{\color{blue} 
+        \smallskip
+
+        Solution: #1 \smallskip}}
+	\newcommand{\keymessage}[1]{{\color{red} #1}}
+\else
+	\newcommand{\solution}[1]{}
+	\newcommand{\keymessage}[1]{}
+\fi
+
+
+\newcommand{\condist}{\xrightarrow{d}}
+\newcommand{\conprob}{\xrightarrow{p}}
+\newcommand{\conas}{\xrightarrow{\mathrm{a.s.}}}
+\newcommand{\indep}{\perp \! \! \! \perp}
+\renewcommand{\bar}{\overline}

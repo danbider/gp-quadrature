@@ -1,0 +1,435 @@
+%----------------------------------------------------------------------------------------
+%    PACKAGES AND THEMES
+%----------------------------------------------------------------------------------------
+
+\documentclass[aspectratio=169,xcolor=dvipsnames]{beamer}
+\usetheme{SimpleDarkBlue}
+
+\usepackage{hyperref}
+\usepackage{graphicx} % Allows including images
+\usepackage{booktabs} % Allows the use of \toprule, \midrule and \bottomrule in tables
+% \usepackage{hw}
+\usepackage{amsmath}
+\usepackage{mathtools} % For \diag and other math operators
+
+%----------------------------------------------------------------------------------------
+%    TITLE PAGE
+%----------------------------------------------------------------------------------------
+
+\title{Polyagamma Augmentation in Equispaced Fourier GP Classification}
+% \subtitle{Subtitle}
+
+\author{Cole Citrenbaum}
+
+\institute
+{
+    % Department of Computer Science and Information Engineering \\
+    % National Taiwan University % Your institution for the title page
+}
+\date{\today} % Date, can be changed to a custom date
+
+%----------------------------------------------------------------------------------------
+%    PRESENTATION SLIDES
+%----------------------------------------------------------------------------------------
+
+\begin{document}
+
+\begin{frame}
+    % Print the title page as the first slide
+    \titlepage
+\end{frame}
+
+\begin{frame}{Overview}
+    % Throughout your presentation, if you choose to use \section{} and \subsection{} commands, these will automatically be printed on this slide as an overview of your presentation
+    \tableofcontents
+\end{frame}
+
+\section{5.23.25}
+
+\begin{frame}{Updates}
+    \begin{itemize}
+        \item Polyagamma Augmentation in GP Classification Using Equispaced Fourier Features
+        \item PG background
+        \item E step updates:
+        \begin{itemize}
+            \item Warmup: CAVI 
+            \item "E Step" Natural Gradients
+            \end{itemize}
+            \item "M Step" Gradients with respect to hyperparams
+
+    \end{itemize}
+\end{frame}
+\section{Function Space}
+
+\begin{frame}{GP setup}
+   
+    $$y_i|f,x \sim Bern(\sigma(f(x_i)) \hspace{0.5cm}\text{independently}$$
+     $$f\sim GP(0,K),$$
+    $$\omega_i \sim PG(1,0)$$
+\end{frame}
+
+\begin{frame}{Polyagamma Augmentation}
+
+\begin{align}
+    p(y,f) &= p(f)\prod_{i=1}^n \frac{1}{2} \exp\left[(y_i - 1/2)f(x_i)\right] \int \exp[-\frac{1}{2} \omega_i f(x_i)^2 PG(\omega_i| 1,0) d\omega\\
+    &\implies
+    p(f,y,\omega) \propto p(f)\prod_{i=1}^n \exp[(y_i - 1/2) f(x_i)]\exp[-\frac{1}{2}\omega_i f(x_i)^2] PG(\omega_i | 1,0)].
+\end{align}
+    $$\boxed{\omega_i |f,y \sim PG(1,f(x_i) \text{ independently}},\footnote{$\exp[-\frac{1}{2} \omega c^2] PG(\omega|1,0) \propto PG(\omega| 1, c)$]}$$
+    $$\boxed{f|\omega,y \sim \mathcal N(m, V)},$$
+where $V = (K_{\theta}^{-1} + \Omega )^{-1}$, $m = V(y - 1/2)$
+\end{frame}
+\section{E step}
+\begin{frame}{CAVI Updates}
+    Use mean-field approach as in Wenzel; posit: $$q(\omega, \beta) = q(\beta) \prod_{i=1}^n q(\omega_i)$$
+    \end{frame}
+    \begin{frame}{CAVI: $q(f)$}
+    Optimize $q$ via CAVI: \vspace{0.5cm}
+    
+    First: \textbf{Fix} $q(\omega)$. 
+
+        \begin{align}
+        \arg \max_{q(f)} E_{q(f,\omega)} \log \frac{p(y,f,\omega)}{q(f, \omega)}&= \arg \max_{q(f)} E_{q(f)} E_{q(\omega)} \log \frac{p(f| y, \omega)}{q(f)} \\&= \arg \min_{q(f)} KL(q(f) \| p(f|y,(E_{q(\omega)} \omega)) )\\
+        & = \mathcal N(\Sigma (y-1/2), (K_\theta^{-1} + \Lambda)^{-1})
+        \end{align}
+        where $\Sigma = (K_\theta^{-1} + \Lambda)^{-1}$. Ie, solution is the posterior $p(f| y, \omega)$ evaluated at $\omega_i = E_{q(\omega)} [\omega_i]  $. 
+        \footnote{Can also show with $\beta\sim N(0,I)$ that we could get $q(\beta) = \mathcal N(m, (I + \Phi^*\Lambda\Phi)^{-1}$: }
+
+\end{frame}
+\begin{frame}{Why..}
+    $q(f) = GP\left(f|\Sigma(y-1/2), (K_\theta^{-1} + \Lambda )^{-1}\right)$ because:
+
+        \begin{align}\log p(f(x)|y,\omega) &= \frac{-1}{2} (f(x) - \Sigma (y-1/2))^T \Sigma^{-1} (f(x) - \Sigma(y-1/2)) + const \\&= -\frac{1}{2}f(x)^T (K_\theta^{-1} + \Omega ) f(x) + \ldots,
+        \end{align}
+        which is linear in $\Omega$. Then $E_{q(f)} \log p(f|y,\omega) =p(f|y,E_q[\omega])$. 
+\end{frame}
+\begin{frame}{CAVI Updates 2}
+     Next, \textbf{fix} $q(f)$. "Closed under tilting" property of PG yields:
+
+
+
+\begin{align}
+    \arg \min _{q(\omega)} E_{q(\omega)} E_{q(f)} \log \frac{PG(\omega_i | 1, f(x_i))}{q(\omega)} &= \arg \min_{q(\omega)} E_{q(\omega)} E_{q(f)} \log (\frac{P(\omega_i| 1,0)\exp(-\frac{1}{2} \omega_i f(x_i)^2)}{q(\omega)} \\&= \arg \min KL(q(\omega) \| PG(\omega_i | 1,c_i) )
+\end{align}
+So we have
+    $$q(\omega_i) = PG(\omega_i| 1,c_i),$$
+    where $c_i  = \sqrt{Var_{q(f)} f(x_i) + \left(E_{q(f)} f(x_i)\right)^2}.$
+
+
+\end{frame}
+
+\begin{frame}{CAVI Summary}
+    $$\boxed{q(f) = \mathcal N(\mu, \Sigma)}$$
+    $$\boxed{q(\omega_i) \sim PG(1, c_i)}$$
+Where we've defined:\\
+  $$c_i = \sqrt{Var_{q(f)} f(x_i) + (E_{q(f)} (f(x_i))^2}$$, 
+    $$\Lambda = diag(E_q[\omega_i]) = diag(\frac{\tanh (c_i/2)}{2c_i}), $$
+  
+    $$\Sigma = (K_\theta^{-1} + \Lambda)^{-1}, \hspace{ 0.5 cm} \mu = \Sigma (y-1/2)$$
+\end{frame}
+
+\begin{frame}{Natural Gradient Updates 1}
+Let's assume no inducing points. \\ 
+
+Natural\footnote{ Algorithm 3 in https://arxiv.org/pdf/1711.06999} parameters:
+    $$\eta_1 = \Sigma^{-1} \mu, \hspace{ 1cm} \eta_2 = \frac{-1}{2} \Sigma^{-1} .$$  
+   Supposing we work with minibatches $S$ with $s=|S|$, from \href{https://arxiv.org/pdf/1802.06383}{Wenzel Eq 12} we get natural gradient updates:
+$$\eta_1^{(t)} \leftarrow (1-\rho_t) \eta_1^{(t-1)} + \rho_t \frac{n}{s} I_S^T (y_S - 1/2)$$
+$$\eta_2^{(t-1)} \leftarrow (1-\rho)\eta_2^{(t-1)} -\frac{\rho}{2} \left[K_\theta^{-1} + \frac{n}{s}I_S^T \Lambda_S I_S\right]. $$\footnote{Dobule check the 1/2}
+    
+\end{frame}
+\begin{frame}{Re Wenzel}
+    Because we don't use sparse inducing points method, we get $$\kappa_S = K_{nn}^{-1} K_{nS} = I_S \in \mathbb R^{s \times n}.$$
+(row selectors). 
+\end{frame}
+\begin{frame}{Natural Grad Updates 2}
+Consider the update:
+    $$\eta_2^{(t-1)} \leftarrow (1-\rho)\eta_2^{(t-1)} -\frac{\rho}{2} \left[K_\theta^{-1} + \frac{n}{s}I_S^T \Lambda_S I_S\right].$$
+   In the inducing points case, $\eta_2 \in \mathbb R^{m\times m}$ ($m$ num of inducing pts). But storing and updating this is a bad idea if $n\times n$.
+\end{frame}
+\begin{frame}{Natural Grad Updates cont}
+    But if we do \textit{multiple} E-steps for each $M$-step, then since $\theta$ not changing within the $E$-step, we can rewrite:
+
+    $$\Sigma_{(t)}^{-1} = K_\theta^{-1} + \Delta^{(t)} \leftarrow  (1-\rho)(K_\theta^{-1} + \Delta^{(t-1)}) + \rho(K_\theta^{-1} + \frac{n}{s}I_S^T\Lambda I_S),$$
+    so we can just track $\Delta^{(t)}$ diagonal matrix:
+
+    $$\Delta^{(t)} = (1-\rho)\Delta^{(t-1)} + \rho \frac{n}{s} I_S^T \Lambda_S I_S.$$
+
+    The good: we don't have to track an entire $n\times n$ precision matrix.\\
+    The bad: we need (?) to do batch coordinate ascent (ie multiple E steps at a time).
+\end{frame}
+\begin{frame}{E step Summary}
+Alternate:
+\begin{enumerate}
+    \item Calculate $c_i$ using $\eta_2^{(t-1)}$, $\eta_1^{(t-1)}$
+    \item Compute $c_i$
+    \item Update $\eta_1,$ $\eta_2$ 
+    \begin{enumerate}
+        \item Either: storing diagonal $\Delta$ instead of $\eta_2$ and batch coordinate ascent
+        \item Or do inducing points and store full $\eta_2$.
+    \end{enumerate}
+\end{enumerate}
+\end{frame}
+\begin{frame}{E-step: Computing $c_i$}
+    Need $\Lambda = diag (E_q[\omega_i]) = diag(\frac{\tanh (c_i/2)}{2c_i}).$
+
+    $$c_i = \sqrt{Var_q (f(x_i)) + \left(E_q f(x_i)\right)^2}.$$
+
+    \begin{itemize}
+        \item $Var_q (f(x_i)) = \Sigma_{ii}$. Use that if $E[z_i z_j] = \delta_{ij}$, then $E[ z\odot (Az)] = diag(A)$. 
+        \item Just need to be able to apply $\alpha \mapsto (K^{-1} + \Delta) z$ and use trace trick:
+        $$\Sigma z = (K^{-1} + \Delta^{(t-1)})^{-1} z $$
+        \item $\Sigma^{-1}\mu =\eta_1$: solving for $\mu$ (mean of $q(f)$) is exactly the same problem. 
+        \item This computation is a recurring problem for us in this approach, because I think we need to CG solve via NUFFT, can't exploit Toeplitz. 
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Solving $z\mapsto \Sigma z$}
+Solve for $\alpha$: $$\Sigma z = (K^{-1} + \Delta)^{-1} z = \alpha$$
+$$\iff K(K^{-1} + \Delta)\alpha = Kz$$
+$$\iff (I + K\Delta)\alpha = Kz$$
+$$\iff (I + FD^2 F^* \Delta)\alpha = FD^2 F^* z$$
+\begin{enumerate}
+    \item Applying the operator $I + FD^2 F^* \Delta$ requires $2$ NUFFT per CG iter
+    \item Also two setup NUFFTs
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{Hyperparameter Updates}
+    From Wenzel Eq 5:
+    $$ \log p(y, \omega, f) = \left(\frac{1}{2}\tilde{y}^T f - \frac{1}{2} f^T \Omega f\right) + \log p(f) + \log p(\omega) + const.$$
+After taking expectation with respect to $q$, the only term with $\theta$ dependence is the prior on $f$. 
+\begin{align} 
+\frac{\partial}{\partial \theta} \mathcal L &= \frac{\partial}{\partial \theta} E_q \log p(f)  \\
+& =\frac{\partial}{\partial \theta} \left(E_q\left[ \frac{-1}{2}Tr(ff^T K_\theta^{-1}) \right] - \frac{1}{2} \log |K|\right)\\
+& = \frac{\partial}{\partial \theta}\left(-\frac{1}{2} Tr\left((\Sigma + \mu \mu^T)K^{-1}\right) - \frac{1}{2} \log |K|\right)\\
+& = \frac{1}{2} \mu^T K^{-1} (\partial_\theta K) K^{-1} \mu + \frac{1}{2}Tr(\Sigma K^{-1} (\partial_\theta K)K^{-1}) - \frac{1}{2} Tr(K^{-1} \partial_\theta K)
+\end{align}
+
+\end{frame}
+\section{M step}
+\begin{frame}{Hyperparameter Updates}
+    \begin{enumerate}
+        \item Term 1
+    \end{enumerate}
+
+    \begin{align}
+        K^{-1} \mu := v\\
+        &\implies Kv  =\mu\\
+        &\implies FD^2 F^* v = \mu\\
+        &\implies F^* FD^2 F^* v = F^*\mu\\
+        &\implies F^* F \beta = F^* \mu \hspace{0.5cm } \text{ where } \beta = D^2 F^* v\\
+        & \text{ Solve with Toeplitz on LHS, NUFFT RHS}\\
+        & \implies F^* v = D^{-2} \beta 
+        \end{align}
+\end{frame}
+\begin{frame}{Hyper updates}
+    
+
+So we can get the first term:
+
+$$\mu^T K^{-1} (\partial_\theta K)K^{-1} \mu = \mu^T K^{-1} FD'F^* K^{-1} \mu = \langle F^* K^{-1} \mu, D'F^* K^{-1} \mu\rangle = \langle D^{-2} \beta , D' D^{-2} \beta\rangle $$
+
+
+\end{frame}
+\begin{frame}{Term 2}
+    $$II \approx \frac{1}{J} \sum_{j=1}^J z^T_j (K^{-1}+\Lambda)^{-1}K^{-1} FD'F^* K^{-1} z$$
+\begin{itemize}
+        \item $F^* K^{-1} z$ via same idea as term 1
+        \item But $z^T (K^{-1}+\Lambda)^{-1} K^{-1} FD' \beta  = z^T (I + \Lambda K)^{-1} (FD'\beta)$
+        \item Same issue as in E-step
+        \item Solving $(\Lambda K + I)\alpha = (\Lambda FD^2 F^* + I)\alpha = y$ for $\alpha$ takes 2 NUFFTs \textbf{per} CG iter
+\end{itemize}
+\end{frame}
+\begin{frame}{Term 3}
+Similar to term 1:
+
+$$III \approx \frac{1}{J} \sum_{j=1}^J z_j^T FD'F^* K^{-1} z_j$$
+Solve $F^* K^{-1} z$ as in term 1, then apply 
+$z^T FD'$ with a single NUFFT. Shares a computation with term $II$.   
+    
+\end{frame}
+\begin{frame}{Summary}
+    \begin{itemize}
+    \item Computational issues come down to $(K^{-1} + \Lambda)$ applies which require 2 NUFFT per apply. 
+    \item Some ideas to address:
+    \begin{enumerate}
+        \item 
+    \end{enumerate}
+    \end{itemize}
+\end{frame}
+
+
+%% Weight space nightmare
+
+% \subsection{Setup}
+% \begin{frame}{Weight-space Setup}
+% Recall, $K_{xx} \approx \Phi \Phi^*$, with $\Phi = FD$ factorization. Let $\phi_i$ be a \textbf{column vector} so that $\phi_i^T$ form the \textbf{rows} of $\Phi$.\\ 
+%     Our model is:
+
+%     $$f|\{x_i\}_{i=1}^n\sim \mathcal{N}(0, \Phi \Phi^*).$$
+%     Equivalently, from Bayesian, weight-space view: Let weights \footnote{\href{https://en.wikipedia.org/wiki/Complex_normal_distribution}{Complex Normal Dist. See my pedantic slide at the end and this \href{https://stats.stackexchange.com/a/70547}{Stack Overflow thread}}} $$\beta \sim \mathcal {CN}(0,\mathbb I_m), \hspace{0.5cm} f = \Phi \beta \sim \mathcal N(0, \Phi \Phi^*).$$. 
+    
+% \end{frame}
+
+% \begin{frame}{Polyagamma Augmentation}
+%     Let $\omega_i \sim PG(1,0)$, $\Omega = diag(\omega_i)$. 
+    
+%     Can show that 
+%     $$\boxed{\beta|\omega,y \sim \mathcal N(\mu, \Sigma)},$$ where $\Sigma = (\Phi^* \Omega \Phi + \mathbb I)^{-1}$, $\mu = \Sigma \Phi^* (y-1/2)$.\\ 
+%     Also:
+%     $$\boxed{\omega_i|\beta, y\sim PG(1, \phi_i^T \beta)} $$
+%     \footnote{https://gregorygundersen.com/blog/2019/09/20/polya-gamma/, also see HW 2 305b solution}
+% \end{frame}
+% \subsection{E step}
+% \begin{frame}{CAVI Updates}
+%     Use mean-field approach as in Wenzel; posit: $$q(\omega, \beta) = q(\beta) \prod_{i=1}^n q(\omega_i)$$
+%     Optimize $q$ via CAVI: \vspace{0.5cm}
+    
+%     First: \textbf{Fix} $q(\omega)$. 
+
+%         \begin{align}
+%         \arg \max_{q(\beta)} E_{q(\beta,\omega)} \log \frac{p(y,\beta,\omega)}{q(\beta, \omega)}&= \arg \max_{q(\beta)} E_{q(\beta)} E_{q(\omega)} \log \frac{p(\beta| y, \omega)}{q(\beta)} \\&= \arg \min_{q(\beta)} KL(q(\beta) \| p(\beta|y,(E_{q(\omega)} \omega)) )\\
+%         & = \mathcal N(\Sigma \Phi^* (y-1/2), (\Phi^* E_{q(\omega)} [\Omega] \Phi + \mathbb I)^{-1},
+%         \end{align}
+%         where $\Sigma = (\Phi^* E_{q(\omega)} [\Omega] \Phi + \mathbb I)^{-1}$. Ie, solution is the posterior $p(\beta| y, \omega)$ evaluated at $\omega_i = E_{q(\omega)} [\omega_i]  $,
+        
+
+% \end{frame}
+
+% \begin{frame}{CAVI Updates 2}
+%     Next, \textbf{fix} $q(\beta)$. "Closed under tilting" property of PG yields:
+
+%     $$q(\omega_i) = PG(\omega_i; 1,c_i),$$
+%     where $c_i  = \sqrt{Var_{q(f)} f(x_i) + \left(E_{q(f)} f(x_i)\right)^2}$, where $\mu,\Sigma$ as in $q(\beta)\sim N(\omega;\mu,\Sigma)$ on previous slide.  
+    
+%     \vspace{1cm} 
+%     Practically:
+%     \begin{itemize}
+%     % \item We can estimate $Var(f(x_i)) \approx z^T (\Phi \Sigma \Phi^* z)_{i}$, Hutchinson style
+%     \item I think get the $E_q (f (x_i)) = (\Phi \mu)_i$ via  NUFFTs 
+%     \item These ops scale with $n$
+%     \end{itemize}. 
+% \end{frame}
+
+% \begin{frame}{CAVI Summary}
+%     $$\boxed{q(\beta) = \mathcal N(\mu, \Sigma)}$$
+%     $$\boxed{q(\omega_i) \sim PG(1, c_i)}$$
+% Where we've defined:\\
+
+%     $$c_i = \sqrt{\phi_i^* (\Sigma +  \mu \mu^H )\phi_i} = \sqrt{Var_{q(\beta)} f(x_i) + (E_{q(\beta)} (f(x_i))^2}$$, 
+
+%     $$\Sigma = (\Phi^* E_{q(\omega)} [\Omega] \Phi + \mathbb I)^{-1}, \hspace{ 0.5 cm} \mu = \Sigma \Phi^* (y-1/2)$$
+% \end{frame}
+
+% \begin{frame}{Natural Gradient Updates}
+%     Natural\footnote{ Algorithm 3 in https://arxiv.org/pdf/1711.06999} parameters:
+%     $$\eta_1 = \Sigma^{-1} \mu, \hspace{ 1cm} \eta_2 = \frac{-1}{2} \Sigma^{-1} .$$  
+%    Supposing we work with minibatches $S$ with $s=|S|$, from \href{https://arxiv.org/pdf/1802.06383}{Wenzel Eq 12} we get natural gradient updates:
+
+%     $$\eta_1^{(t)} \leftarrow (1-\rho) \eta_1^{(t-1)} + \rho \frac{n}{s} \Phi_s^* (y_S -\frac{1}{2})$$
+
+%     $$\eta_2^{(t)} = (1-\rho)\eta_2^{(t-1)} -\frac{\rho}{2}\left[(\mathbb I + \frac{n}{s} \Phi_S^* \Lambda_S \Phi_S)\right].$$
+%     $\Lambda_S = diag(\{\lambda_i\}_{i\in S})$, where $\lambda_i = E_q[\omega_i] = \frac{\tanh (c_i/2)}{2c_i}$, with $c_i$ as in CAVI slides. \footnote{Comparing with Wenzel, we have $K_{mm} = Cov(f(\vec{z}))$; prior covariance on latent variables. For us: $Cov(\beta) = \mathbb I$, since we have $q(\beta, \omega)$ instead of $q(u,\omega)$}
+    
+% \end{frame}
+% \begin{frame}{Natural Grad Updates 2}
+%     I don't want to form $\eta_2$ or $\Phi_S^* \Lambda_S \Phi_S \in \mathbb R^{m\times m}$ matrices. \\\vspace{0.5cm}
+%     If we have a fixed $m$ (RFF): we can re-parametrize the updates using finite feature spacing: 
+%     $$-2\eta_2 = \Sigma^{-1} = \Phi^* E_{q} [\Omega] \Phi + \mathbb I = \mathbb I + \sum_{i=1}^n d_i \phi_i \phi_i^*,$$
+%     where $d_i = E_{q(\omega)}[\omega_i].$ 
+    
+%     \begin{align}
+%     \mathbb I + \sum_{i=1}^n d_i^{(t)}\phi_i \phi_i^*&= P^{(t)} \\&= (1-\rho)P^{(t-1)} + \rho \left[\mathbb I +\frac{n}{s} \Phi_S^* \Lambda_S \Phi_S\right] \\&= (1-\rho) (\mathbb I + \sum_{i=1}^n d_i^{(t-1)} \phi_i\phi_i^*) + \rho (\mathbb I + \frac{n}{s} \sum_{j=1}^s \theta_j \phi_j \phi_j^*)
+%     \end{align}
+
+% \end{frame}
+% \begin{frame}{Natural Grad Updates 3}
+    
+
+%         Match $d_i^{(t)}$ terms:
+        
+%         $$d_i^{(t)} \phi_i \phi_i^* = (1-\rho)d_i^{(t-1)}\phi_i \phi_i^* + \rho (\frac{n}{s} \lambda_i \phi_i \phi_i^*)1[i\in S]$$
+        
+%         Leads to updates 
+%     $$d_i^{(t)} \leftarrow (1-\rho) d_i^{(t-1)} + \left(\rho\frac{n}{s} \lambda_i\right) 1[i\in S],$$
+%     this way we have to update $\{d_i\}_{i=1}^s$ instead of a dense $m \times m$ matrix.
+% \end{frame}
+% \begin{frame}{Natural Grad "E Step" Summary}
+%     "E Step" Updates for $q_\phi$, where $\phi = \{\eta_1,\eta_2\}$:
+
+%     $$\boxed{\eta_1^{(t)} \leftarrow (1-\rho) \eta_1^{(t-1)} + \rho \frac{n}{s} \Phi_s^* (y_S -\frac{1}{2})},$$
+
+%     $$\boxed{d_i^{(t)} \leftarrow (1-\rho) d_i^{(t-1)} + \left(\rho\frac{n}{s} \lambda_i\right) 1[i\in S] }$$
+%     where $\lambda_i = E_q[\omega_i] = \frac{\tanh (c_i/2)}{2c_i}$. 
+
+%     Where we've defined:\\
+
+%     $$c_i = \sqrt{\phi_i^T (\Sigma +  \mu \mu^H )\phi_i} = \sqrt{Var_{q(\beta)} f(x_i) + (E_{q(\beta)} (f(x_i))^2}$$, 
+
+%     $$\Sigma = (\Phi^* E_{q(\omega)} [\Omega] \Phi + \mathbb I)^{-1}, \hspace{ 0.5 cm} \mu = \Sigma \Phi^* (y-1/2)$$
+% \end{frame}
+
+% \begin{frame}{Sanity Check}
+%     CAVI, Natural Gradient, and Gibbs Sampler all recover nearly the same $(\mu,\Sigma)$
+% \end{frame}
+% \subsection{M Step}
+% \begin{frame}{Hyperparameter updates}
+%     Let $\theta$ be Kernel hypeparameters. Can write 
+%     $$ \log p(y,\omega|\beta) \propto \sum_{i=1}^n \left( \left( y_i - 1/2\right) \phi_i^* \mu -\frac{1}{2} \omega_i (\phi_i^T \beta)^2 \right) +const$$
+%     \begin{align}
+%         E_q \log \frac{p(y,\omega, \beta)}{q(\omega, \beta)} &=  \sum_{i=1}^n (y_i -1/2)\phi_i^* E_q[\beta ]- \frac{1}{2} E_q[\omega_i] \phi_i^T E_q [\beta \beta^H]\overline{\phi_i} +const\\
+%         & = (y-1/2)\Phi^* \mu - \frac{1}{2} \mu^H \Phi^* \Lambda \Phi \mu - \frac{1}{2} Tr(\Sigma \Phi^* \Lambda \Phi),
+%     \end{align}
+% where $\Lambda$ diagonal with $(\Lambda)_{ii} = E_{q(\omega_i)} [\omega_i]$
+% \end{frame}
+
+% \begin{frame}{Hypers cont}
+% Taking partials with respect to $\theta$ yields:
+
+% $$\frac{\partial}{\partial \theta} \mathcal L = (y-1/2)D'F^* \mu - \frac{1}{2} \mu^H \frac{\partial}{\partial \theta}  (\Phi\Lambda \Phi^*)\mu -\frac{1}{2} Tr\left(\Sigma \frac{\partial}{\partial \theta}  (\Phi\Lambda \Phi^*)\right) $$
+
+% Then substituting:
+
+%  $$\frac{\partial }{\partial \theta}  (\Phi\Lambda \Phi^*) = D'F^* \Lambda FD + DF^*\Lambda FD' = A  +A^*$$ 
+%  where $A =D'F^* \Lambda FD $. Using $z^T Az= z^TA^* z$, approximate using $J$ Hutchinson Probes
+%     $$\boxed{\frac{\partial }{\partial \theta} \mathcal L \approx (y-1/2)D'F^* \mu - \mu^H D'F^*\Lambda FD \mu -\frac{1}{J} z_k^T \Sigma D'F^*\Lambda FD z_k}   $$
+
+% \end{frame}
+% \begin{frame}{Thoughts}
+%     \begin{itemize}
+%         \item I think that these $D'F^* \Lambda FD\mu$ terms are $\mathcal O(n\log n)$ ops by NUFFT. 
+%     \end{itemize}
+% \end{frame}
+% \begin{frame}{Outline}
+% Like a big coordinate ascent loop.  
+%     \begin{enumerate}
+%         \item E step:
+%     \begin{itemize}
+%         \item Fix hyperparameters. Perform coordinate ascent on $\phi = \{ \eta_1,\eta_2\}$ to step towards optimal $q_\phi$
+%     \end{itemize}
+%     \item M Step: 
+%     \begin{itemize} 
+%     \item Fix $q$. Gradient ascent $\theta \leftarrow \theta^{(t-1)} + \rho \nabla_\theta \mathcal L(\theta,q)$
+%     \end{itemize}
+%     \end{enumerate}
+% \end{frame}
+% \begin{frame}{Notes to self re: complex valued $\Phi$, $\beta$...}
+%     Need that $\beta\in \mathbb C^m$ because $\Phi \in \mathbb C^{n\times m}$ and we need that $f = \Phi \mu \in \mathbb R$. This way, $y_i|x_i \sim Bern(\sigma(f(x_i))$ makes sense.\vspace{0.5cm} 
+% Consider the column of $F$ corresponding to $\xi_j$, I'll call it $F_j$ for shorthand, where $j\in [m]$. Then $F$ has $2m+1$ columns. 
+
+% \vspace{0.5cm}
+% I need $FD\beta$ to be real so that $f = \Phi \beta$ is real.  So let my prior be: $\beta_j \sim \mathcal{C N}(0,1)$ and $\beta_{-j} = \overline{\beta_j}$. \vspace{0.5cm}With this, noting that $F_jD_{jj} = \overline{F_{-j}D_{-jj}}$, then $F_j D_{jj} \beta _j + F_{-j}D_{-jj} \beta_{-j} = 2\Re (F_jD_{jj} \beta_j) \in \mathbb R$. Also, we still have $E[\beta \beta^H] = \mathbb I$. 
+% Also, all of the polyagamma derivations remain as typical. 
+    
+% \end{frame}
+
+
+
+
+\end{document}
+
+
+
+
+
