@@ -11,3 +11,5 @@ __pycache__
 
 efgp1d.py
 efgp3d.py
+*.h5ad
+*.csv
