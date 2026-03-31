@@ -8,11 +8,13 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
+import pytorch_finufft.functional as pff
 import torch
 import torch.nn.functional as F
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from torch import vmap
+from torch.fft import fftn, ifftn
 from torch.optim import Adam
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +25,6 @@ from cg import ConjugateGradients
 from efgpnd import NUFFT, ToeplitzND, compute_convolution_vector_vectorized_dD
 from kernels import SquaredExponential
 from utils.kernels import get_xis
-
 
 @dataclass
 class qVariationalParams:
@@ -373,15 +374,29 @@ def _build_spectral_state(
     )
 
 
+def _build_weighted_toeplitz(
+    delta: torch.Tensor,
+    spectral: _SpectralState,
+) -> ToeplitzND:
+    weights = delta.to(dtype=spectral.ws.dtype, device=delta.device).flatten()
+    conv_shape = tuple(2 * n - 1 for n in spectral.out_shape)
+    v_weighted = spectral.nufft_op.type1(weights, out_shape=conv_shape)
+    return ToeplitzND(v_weighted.to(dtype=spectral.ws.dtype), force_pow2=True)
+
+
 def _make_sigma_apply(
     spectral: _SpectralState,
     delta: torch.Tensor,
     *,
     cg_tol: float,
-    use_toeplitz_warm_start: bool,
+    use_exact_weighted_toeplitz_operator: bool = False,
+    weighted_toeplitz: ToeplitzND | None = None,
 ) -> tuple[Callable[[torch.Tensor], torch.Tensor], dict[str, int]]:
-    info = {"warmstart_iters": 0, "cg_iters": 0}
+    info = {"cg_iters": 0}
     delta_complex = delta.to(dtype=spectral.ws.dtype, device=delta.device)
+    weighted_toeplitz_op = weighted_toeplitz
+    if use_exact_weighted_toeplitz_operator and weighted_toeplitz_op is None:
+        weighted_toeplitz_op = _build_weighted_toeplitz(delta_complex, spectral)
 
     def sigma_apply(z: torch.Tensor) -> torch.Tensor:
         vector_input = z.dim() == 1
@@ -390,41 +405,22 @@ def _make_sigma_apply(
         z = z.to(dtype=spectral.ws.dtype)
 
         Delta = delta_complex.view(1, -1)
-        z_feat = spectral.fadj_batched(z)
-        Kz = spectral.fwd_batched(spectral.ws2 * z_feat)
-        rhs = spectral.ws * spectral.fadj_batched(Delta * Kz)
+        rhs = spectral.ws * spectral.fadj_batched(z)
 
         def A_feat(u: torch.Tensor) -> torch.Tensor:
+            if weighted_toeplitz_op is not None:
+                if u.dim() == 1:
+                    t = spectral.ws * u
+                    return u + spectral.ws * weighted_toeplitz_op(t)
+                t = u * spectral.ws[None, :]
+                return u + spectral.ws[None, :] * weighted_toeplitz_op(t)
             psi_u = spectral.fwd_batched(spectral.ws * u)
             return u + spectral.ws * spectral.fadj_batched(Delta * psi_u)
-
-        x0 = torch.zeros_like(rhs)
-        if use_toeplitz_warm_start:
-            delta_bar = delta_complex.mean()
-
-            def A_tilde(u: torch.Tensor) -> torch.Tensor:
-                if u.dim() == 1:
-                    return u + delta_bar * (spectral.ws * spectral.toeplitz(spectral.ws * u))
-                rows = [spectral.ws * spectral.toeplitz(spectral.ws * u[b]) for b in range(u.shape[0])]
-                return u + delta_bar * torch.stack(rows, dim=0)
-
-            cg0 = ConjugateGradients(
-                A_tilde,
-                rhs,
-                x0=torch.zeros_like(rhs),
-                tol=1e-3,
-                max_iter=5000,
-                early_stopping=True,
-            )
-            warm = cg0.solve()
-            info["warmstart_iters"] = cg0.iters_completed
-            if cg0.iters_completed < 4500:
-                x0 = warm
 
         cg = ConjugateGradients(
             A_feat,
             rhs,
-            x0=x0,
+            x0=torch.zeros_like(rhs),
             tol=cg_tol,
             max_iter=2000,
             early_stopping=True,
@@ -432,8 +428,7 @@ def _make_sigma_apply(
         x = cg.solve()
         info["cg_iters"] = cg.iters_completed
 
-        out = spectral.fwd_batched(spectral.ws * x)
-        result = (Kz - out).real
+        result = spectral.fwd_batched(spectral.ws * x).real
         if vector_input:
             return result.squeeze(0)
         return result
@@ -446,14 +441,22 @@ def _make_feature_space_solver(
     spectral: _SpectralState,
     *,
     cg_tol: float,
-    use_toeplitz_warm_start: bool,
-) -> tuple[Callable[[torch.Tensor], tuple[torch.Tensor, int, int]], Callable[[torch.Tensor], torch.Tensor]]:
+    use_exact_weighted_toeplitz_operator: bool = False,
+    weighted_toeplitz: ToeplitzND | None = None,
+) -> tuple[
+    Callable[[torch.Tensor], tuple[torch.Tensor, int]],
+    Callable[[torch.Tensor], torch.Tensor],
+    dict[str, int],
+]:
     omega = delta.to(dtype=spectral.ws.dtype, device=delta.device).flatten()
     D2_real = spectral.ws2.real
     eps_d = max(float(D2_real.mean()) * 1e-14, 1e-14)
     Ds = torch.sqrt(torch.clamp(D2_real, min=eps_d)).to(dtype=spectral.ws.dtype)
     Dsinv = 1.0 / Ds
-    wbar = omega.real.mean().to(dtype=spectral.ws.dtype)
+    info = {"cg_iters": 0}
+    weighted_toeplitz_op = weighted_toeplitz
+    if use_exact_weighted_toeplitz_operator and weighted_toeplitz_op is None:
+        weighted_toeplitz_op = _build_weighted_toeplitz(omega, spectral)
 
     def apply_omega(v: torch.Tensor) -> torch.Tensor:
         if v.dim() == 2:
@@ -461,6 +464,12 @@ def _make_feature_space_solver(
         return omega * v
 
     def apply_S(Y: torch.Tensor) -> torch.Tensor:
+        if weighted_toeplitz_op is not None:
+            if Y.dim() == 1:
+                t = Ds * Y
+                return Ds * weighted_toeplitz_op(t)
+            t = Y * Ds[None, :]
+            return Ds[None, :] * weighted_toeplitz_op(t)
         if Y.dim() == 1:
             t = Ds * Y
             u = spectral.fwd(t)
@@ -476,46 +485,23 @@ def _make_feature_space_solver(
     def apply_IpS(Y: torch.Tensor) -> torch.Tensor:
         return Y + apply_S(Y)
 
-    def apply_IpS_toeplitz(Y: torch.Tensor) -> torch.Tensor:
-        if Y.dim() == 1:
-            t = Ds * Y
-            return Y + wbar * (Ds * spectral.toeplitz(t))
-        t = Y * Ds[None, :]
-        rows = [spectral.toeplitz(t[b]) for b in range(t.shape[0])]
-        Tt = torch.stack(rows, dim=0)
-        return Y + wbar * (Ds[None, :] * Tt)
-
-    def solve_A_beta(q: torch.Tensor) -> tuple[torch.Tensor, int, int]:
+    def solve_A_beta(q: torch.Tensor) -> tuple[torch.Tensor, int]:
         rhs = Ds * q if q.dim() == 1 else q * Ds[None, :]
-        x0 = torch.zeros_like(rhs)
-        warm_iters = 0
-        if use_toeplitz_warm_start:
-            cg0 = ConjugateGradients(
-                apply_IpS_toeplitz,
-                rhs,
-                x0=x0,
-                tol=1e-2,
-                max_iter=5000,
-                early_stopping=True,
-            )
-            warm = cg0.solve()
-            warm_iters = cg0.iters_completed
-            if cg0.iters_completed < 4500:
-                x0 = warm
 
         cg = ConjugateGradients(
             apply_IpS,
             rhs,
-            x0=x0,
+            x0=torch.zeros_like(rhs),
             tol=cg_tol,
             max_iter=2000,
             early_stopping=True,
         )
         y = cg.solve()
+        info["cg_iters"] = int(cg.iters_completed)
         beta = Dsinv * y if q.dim() == 1 else y * Dsinv[None, :]
-        return beta, cg.iters_completed, warm_iters
+        return beta, cg.iters_completed
 
-    return solve_A_beta, apply_omega
+    return solve_A_beta, apply_omega, info
 
 
 def _run_estep(
@@ -533,7 +519,7 @@ def _run_estep(
     n_probes: int,
     cg_tol: float,
     reuse_probes: bool,
-    use_toeplitz_warm_start: bool,
+    use_exact_weighted_toeplitz_operator: bool = False,
     seed: int | None,
     verbose: int,
 ) -> tuple[_VariationalState, dict[str, float]]:
@@ -541,7 +527,7 @@ def _run_estep(
         spectral,
         variational.delta,
         cg_tol=cg_tol,
-        use_toeplitz_warm_start=use_toeplitz_warm_start,
+        use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
     )
     probes = variational.probes
     fit_metric = float("nan")
@@ -593,7 +579,6 @@ def _run_estep(
         "residual": residual,
         "metric": fit_metric,
         "cg_iters": float(sigma_info["cg_iters"]),
-        "warmstart_iters": float(sigma_info["warmstart_iters"]),
     }
 
 
@@ -604,14 +589,14 @@ def _compute_mstep_gradient(
     *,
     n_probes: int,
     cg_tol: float,
-    use_toeplitz_warm_start: bool,
+    use_exact_weighted_toeplitz_operator: bool = False,
     seed: int | None,
 ) -> dict[str, torch.Tensor]:
-    solve_A_beta, apply_omega = _make_feature_space_solver(
+    solve_A_beta, apply_omega, solve_info = _make_feature_space_solver(
         delta,
         spectral,
         cg_tol=cg_tol,
-        use_toeplitz_warm_start=use_toeplitz_warm_start,
+        use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
     )
 
     probes = _sample_rademacher(
@@ -624,7 +609,7 @@ def _compute_mstep_gradient(
     q_y = spectral.fadj_batched(kappa.to(dtype=spectral.ws.dtype).unsqueeze(0))
 
     Q_all = torch.cat([Q_block, q_y], dim=0)
-    beta_all, cg_iters, warm_iters = solve_A_beta(Q_all)
+    beta_all, cg_iters = solve_A_beta(Q_all)
     beta_probes = beta_all[:-1, :]
     beta_x = beta_all[-1, :]
 
@@ -643,7 +628,6 @@ def _compute_mstep_gradient(
         "term2": term2,
         "beta_mean": beta_x,
         "cg_iters": torch.tensor(float(cg_iters)),
-        "warmstart_iters": torch.tensor(float(warm_iters)),
     }
 
 
@@ -653,16 +637,17 @@ def _solve_beta_mean(
     spectral: _SpectralState,
     *,
     cg_tol: float,
-    use_toeplitz_warm_start: bool,
-) -> tuple[torch.Tensor, int, int]:
-    solve_A_beta, _ = _make_feature_space_solver(
+    use_exact_weighted_toeplitz_operator: bool = False,
+) -> tuple[torch.Tensor, int]:
+    solve_A_beta, _, solve_info = _make_feature_space_solver(
         delta,
         spectral,
         cg_tol=cg_tol,
-        use_toeplitz_warm_start=use_toeplitz_warm_start,
+        use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
     )
     q_y = spectral.fadj(kappa.to(dtype=spectral.ws.dtype))
-    return solve_A_beta(q_y)
+    beta, cg_iters = solve_A_beta(q_y)
+    return beta, cg_iters
 
 
 def _predictive_mean(
@@ -691,8 +676,9 @@ def _predictive_latent_moments(
     *,
     cg_tol: float,
     nufft_eps: float,
-    use_toeplitz_warm_start: bool,
+    use_exact_weighted_toeplitz_operator: bool = False,
     batch_size: int | None = None,
+    weighted_toeplitz: ToeplitzND | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if X_new.ndim != 2:
         raise ValueError("X_new must have shape (n_samples, n_features).")
@@ -702,16 +688,18 @@ def _predictive_latent_moments(
         empty = torch.empty((0,), device=X_new.device, dtype=delta.dtype)
         return empty, empty
 
-    solve_A_beta, _ = _make_feature_space_solver(
+    solve_A_beta, _, _ = _make_feature_space_solver(
         delta,
         spectral,
         cg_tol=cg_tol,
-        use_toeplitz_warm_start=use_toeplitz_warm_start,
+        use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
+        weighted_toeplitz=weighted_toeplitz,
     )
     block_size = n_test if batch_size is None else max(1, min(batch_size, n_test))
 
     means: list[torch.Tensor] = []
     variances: list[torch.Tensor] = []
+    ws2_row = spectral.ws2.unsqueeze(0)
     for start in range(0, n_test, block_size):
         stop = min(start + block_size, n_test)
         X_block = X_new[start:stop]
@@ -724,26 +712,26 @@ def _predictive_latent_moments(
             device=X_block.device,
         )
 
-        if beta_mean is None:
-            mean_block = torch.empty((X_block.shape[0],), device=X_block.device, dtype=delta.dtype)
-        else:
-            mean_block = block_op.type2(
-                spectral.ws2 * beta_mean,
-                out_shape=spectral.out_shape,
-            ).real
-
         eye_block = torch.eye(
             X_block.shape[0],
             device=X_block.device,
             dtype=spectral.ws.dtype,
         )
         phi_block = block_op.type1(eye_block, out_shape=spectral.out_shape).reshape(X_block.shape[0], -1)
-        beta_block, _, _ = solve_A_beta(phi_block)
-        variance_block = block_op.type2(
-            spectral.ws2 * beta_block,
-            out_shape=spectral.out_shape,
-        ).real
-        variance_block = variance_block.diagonal(dim1=0, dim2=1).clamp_min(0.0)
+
+        if beta_mean is None:
+            mean_block = torch.empty((X_block.shape[0],), device=X_block.device, dtype=delta.dtype)
+        else:
+            mean_block = torch.sum(
+                phi_block.conj() * (ws2_row * beta_mean.unsqueeze(0)),
+                dim=1,
+            ).real
+
+        beta_block, _ = solve_A_beta(phi_block)
+        variance_block = torch.sum(
+            phi_block.conj() * (ws2_row * beta_block),
+            dim=1,
+        ).real.clamp_min(0.0)
 
         means.append(mean_block)
         variances.append(variance_block)
@@ -758,8 +746,9 @@ def _predictive_variance(
     *,
     cg_tol: float,
     nufft_eps: float,
-    use_toeplitz_warm_start: bool,
+    use_exact_weighted_toeplitz_operator: bool = False,
     batch_size: int | None = None,
+    weighted_toeplitz: ToeplitzND | None = None,
 ) -> torch.Tensor:
     _, variance = _predictive_latent_moments(
         X_new,
@@ -768,10 +757,256 @@ def _predictive_variance(
         spectral,
         cg_tol=cg_tol,
         nufft_eps=nufft_eps,
-        use_toeplitz_warm_start=use_toeplitz_warm_start,
+        use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
         batch_size=batch_size,
+        weighted_toeplitz=weighted_toeplitz,
     )
     return variance
+
+
+def _estimate_stochastic_variance_sums(
+    delta: torch.Tensor,
+    spectral: _SpectralState,
+    *,
+    cg_tol: float,
+    n_probes: int,
+    use_exact_weighted_toeplitz_operator: bool = False,
+    seed: int | None = None,
+    weighted_toeplitz: ToeplitzND | None = None,
+) -> tuple[torch.Tensor, dict[str, int]]:
+    if n_probes <= 0:
+        raise ValueError("n_probes must be positive for stochastic predictive variance.")
+
+    solve_A_beta, _, solve_info = _make_feature_space_solver(
+        delta,
+        spectral,
+        cg_tol=cg_tol,
+        use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
+        weighted_toeplitz=weighted_toeplitz,
+    )
+    n_features = spectral.ws.numel()
+    eta_real = _sample_rademacher(
+        (n_probes, n_features),
+        device=delta.device,
+        dtype=delta.dtype,
+        seed=seed,
+    )
+    etas = eta_real.to(dtype=spectral.ws.dtype)
+    beta_probes, cg_iters = solve_A_beta(etas)
+    gammas = spectral.ws2.unsqueeze(0) * beta_probes
+
+    grid_shape = spectral.out_shape
+    corr_shape = tuple(2 * m - 1 for m in grid_shape)
+    fft_dims = tuple(range(1, len(grid_shape) + 1))
+    gamma_grid = gammas.reshape((n_probes,) + grid_shape)
+    eta_grid = etas.reshape((n_probes,) + grid_shape)
+    gamma_fft = fftn(gamma_grid, s=corr_shape, dim=fft_dims)
+    eta_fft = fftn(eta_grid, s=corr_shape, dim=fft_dims)
+    est_sums = ifftn(gamma_fft * torch.conj(eta_fft), s=corr_shape, dim=fft_dims).mean(dim=0)
+
+    info = {
+        "cg_iters": int(cg_iters),
+        "n_probes": int(n_probes),
+    }
+    return est_sums, info
+
+
+def _evaluate_stochastic_variance_sums(
+    est_sums: torch.Tensor,
+    X_new: torch.Tensor,
+    *,
+    h: float,
+    nufft_eps: float,
+    cdtype: torch.dtype,
+) -> torch.Tensor:
+    eval_op = NUFFT(
+        X_new,
+        torch.zeros_like(X_new),
+        h,
+        nufft_eps,
+        cdtype=cdtype,
+        device=X_new.device,
+    )
+    variance = pff.finufft_type2(
+        eval_op.phi,
+        est_sums.contiguous(),
+        eps=nufft_eps,
+        isign=+1,
+        modeord=True,
+    ).real
+    return variance.clamp_min(0.0)
+
+
+def _predictive_variance_stochastic(
+    X_new: torch.Tensor,
+    delta: torch.Tensor,
+    spectral: _SpectralState,
+    *,
+    cg_tol: float,
+    nufft_eps: float,
+    n_probes: int,
+    use_exact_weighted_toeplitz_operator: bool = False,
+    seed: int | None = None,
+    est_sums: torch.Tensor | None = None,
+    weighted_toeplitz: ToeplitzND | None = None,
+) -> tuple[torch.Tensor, dict[str, int]]:
+    if est_sums is None:
+        est_sums, info = _estimate_stochastic_variance_sums(
+            delta,
+            spectral,
+            cg_tol=cg_tol,
+            n_probes=n_probes,
+            use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
+            seed=seed,
+            weighted_toeplitz=weighted_toeplitz,
+        )
+    else:
+        info = {
+            "cg_iters": 0,
+            "n_probes": int(n_probes),
+        }
+
+    variance = _evaluate_stochastic_variance_sums(
+        est_sums.to(device=X_new.device, dtype=spectral.ws.dtype),
+        X_new,
+        h=spectral.h,
+        nufft_eps=nufft_eps,
+        cdtype=spectral.ws.dtype,
+    )
+    return variance, info
+
+
+def _chebyshev_lobatto_nodes(a: float, b: float, n_nodes: int) -> tuple[np.ndarray, np.ndarray]:
+    if n_nodes < 2:
+        raise ValueError("predictive_variance_chebyshev_nodes must be at least 2.")
+    k = np.arange(n_nodes, dtype=np.float64)
+    nodes_std = np.cos(np.pi * k / (n_nodes - 1))
+    weights = np.ones(n_nodes, dtype=np.float64)
+    weights[0] = 0.5
+    weights[-1] = 0.5
+    weights *= (-1.0) ** k
+    nodes = 0.5 * (a + b) + 0.5 * (b - a) * nodes_std
+    scale = 2.0 / (b - a) if b > a else 1.0
+    order = np.argsort(nodes)
+    return nodes[order], (weights * scale)[order]
+
+
+def _barycentric_interpolation_matrix(
+    nodes: np.ndarray,
+    weights: np.ndarray,
+    targets: np.ndarray,
+    *,
+    atol: float = 1e-14,
+) -> np.ndarray:
+    nodes = np.asarray(nodes, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    targets = np.asarray(targets, dtype=np.float64)
+    diff = targets[:, None] - nodes[None, :]
+    mat = np.empty((targets.size, nodes.size), dtype=np.float64)
+
+    close = np.isclose(diff, 0.0, atol=atol, rtol=0.0)
+    matched_rows = close.any(axis=1)
+    if np.any(matched_rows):
+        matched_idx = np.argmax(close[matched_rows], axis=1)
+        mat[matched_rows] = 0.0
+        mat[np.where(matched_rows)[0], matched_idx] = 1.0
+
+    unmatched_rows = ~matched_rows
+    if np.any(unmatched_rows):
+        diff_u = diff[unmatched_rows]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            raw = weights[None, :] / diff_u
+        mat[unmatched_rows] = raw / raw.sum(axis=1, keepdims=True)
+    return mat
+
+
+def _tensor_product_barycentric_interpolate(
+    node_values: torch.Tensor,
+    interpolation_mats: list[torch.Tensor],
+) -> torch.Tensor:
+    dimension = len(interpolation_mats)
+    if dimension == 0:
+        raise ValueError("At least one interpolation matrix is required.")
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    if dimension > len(letters):
+        raise ValueError("Chebyshev interpolation currently supports at most 26 dimensions.")
+    node_letters = letters[:dimension]
+    operands: list[torch.Tensor] = []
+    input_terms: list[str] = []
+    for idx, letter in enumerate(node_letters):
+        operands.append(interpolation_mats[idx])
+        input_terms.append(f"n{letter}")
+    operands.append(node_values)
+    input_terms.append(node_letters)
+    expr = ",".join(input_terms) + "->n"
+    return torch.einsum(expr, *operands)
+
+
+def _predictive_variance_chebyshev(
+    X_new: torch.Tensor,
+    delta: torch.Tensor,
+    spectral: _SpectralState,
+    *,
+    cg_tol: float,
+    nufft_eps: float,
+    n_nodes_per_dim: int,
+    use_exact_weighted_toeplitz_operator: bool = False,
+    batch_size: int | None = None,
+    weighted_toeplitz: ToeplitzND | None = None,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    if X_new.ndim != 2:
+        raise ValueError("X_new must have shape (n_samples, n_features).")
+    if X_new.shape[0] == 0:
+        empty = torch.empty((0,), device=X_new.device, dtype=delta.dtype)
+        return empty, {
+            "cg_iters": 0.0,
+            "n_nodes_total": 0.0,
+        }
+
+    dimension = X_new.shape[1]
+    node_axes_np: list[np.ndarray] = []
+    barycentric_mats: list[torch.Tensor] = []
+    for dim in range(dimension):
+        coord = X_new[:, dim].detach().cpu().numpy()
+        lower = float(coord.min())
+        upper = float(coord.max())
+        if np.isclose(lower, upper):
+            pad = max(abs(lower), 1.0) * 1e-6
+            lower -= pad
+            upper += pad
+        nodes_np, weights_np = _chebyshev_lobatto_nodes(lower, upper, n_nodes_per_dim)
+        interp_np = _barycentric_interpolation_matrix(nodes_np, weights_np, coord)
+        node_axes_np.append(nodes_np)
+        barycentric_mats.append(
+            torch.as_tensor(interp_np, device=X_new.device, dtype=delta.dtype)
+        )
+
+    node_axes_t = [
+        torch.as_tensor(axis, device=X_new.device, dtype=X_new.dtype) for axis in node_axes_np
+    ]
+    mesh = torch.meshgrid(*node_axes_t, indexing="ij")
+    node_points = torch.stack([g.reshape(-1) for g in mesh], dim=1)
+    node_variance = _predictive_variance(
+        node_points,
+        delta,
+        spectral,
+        cg_tol=cg_tol,
+        nufft_eps=nufft_eps,
+        use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
+        batch_size=batch_size,
+        weighted_toeplitz=weighted_toeplitz,
+    )
+    node_shape = (n_nodes_per_dim,) * dimension
+    interpolated = _tensor_product_barycentric_interpolate(
+        node_variance.reshape(node_shape).to(dtype=delta.dtype),
+        barycentric_mats,
+    ).clamp_min(0.0)
+
+    info = {
+        "cg_iters": float(node_points.shape[0]),
+        "n_nodes_total": float(node_points.shape[0]),
+    }
+    return interpolated, info
 
 
 def _dense_pg_reference_gradient(
@@ -847,9 +1082,12 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
         spectral_eps: float = 1e-4,
         trunc_eps: float = 1e-4,
         jitter: float = 1e-8,
-        use_toeplitz_warm_start: bool = True,
+        use_exact_weighted_toeplitz_operator: bool = True,
         reuse_e_probes: bool = True,
         prediction_batch_size: int | None = 64,
+        predictive_variance_method: str = "exact",
+        predictive_variance_probes: int = 16,
+        predictive_variance_chebyshev_nodes: int = 7,
         warm_start: bool = False,
         random_state: int | None = None,
         device: str = "auto",
@@ -874,15 +1112,108 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
         self.spectral_eps = spectral_eps
         self.trunc_eps = trunc_eps
         self.jitter = jitter
-        self.use_toeplitz_warm_start = use_toeplitz_warm_start
+        self.use_exact_weighted_toeplitz_operator = use_exact_weighted_toeplitz_operator
         self.reuse_e_probes = reuse_e_probes
         self.prediction_batch_size = prediction_batch_size
+        self.predictive_variance_method = predictive_variance_method
+        self.predictive_variance_probes = predictive_variance_probes
+        self.predictive_variance_chebyshev_nodes = predictive_variance_chebyshev_nodes
         self.warm_start = warm_start
         self.random_state = random_state
         self.device = device
         self.dtype = dtype
         self.verbose = verbose
         self.store_history = store_history
+
+    def _predictive_variance_seed(self) -> int | None:
+        if self.random_state is None:
+            return None
+        return int(self.random_state) + 2_000_000
+
+    def _predictive_variance_method_normalized(self) -> str:
+        method = str(self.predictive_variance_method).lower()
+        if method not in {"exact", "stochastic", "stochastic_diag_sums", "chebyshev"}:
+            raise ValueError(
+                "predictive_variance_method must be one of "
+                "{'exact', 'stochastic', 'stochastic_diag_sums', 'chebyshev'}."
+            )
+        return "stochastic" if method == "stochastic_diag_sums" else method
+
+    def _get_predictive_weighted_toeplitz(self) -> ToeplitzND | None:
+        if not self.use_exact_weighted_toeplitz_operator:
+            return None
+        cached = getattr(self, "_predictive_weighted_toeplitz_", None)
+        if cached is None:
+            cached = _build_weighted_toeplitz(
+                self._variational_state_.delta.to(
+                    dtype=self._spectral_state_.ws.dtype,
+                    device=self._device_,
+                ),
+                self._spectral_state_,
+            )
+            self._predictive_weighted_toeplitz_ = cached
+        return cached
+
+    def _predictive_variance_off_train(self, X_t: torch.Tensor) -> torch.Tensor:
+        method = self._predictive_variance_method_normalized()
+        weighted_toeplitz = self._get_predictive_weighted_toeplitz()
+        if method == "exact":
+            variance = _predictive_variance(
+                X_t,
+                self._variational_state_.delta,
+                self._spectral_state_,
+                cg_tol=self.cg_tol,
+                nufft_eps=self.nufft_eps,
+                use_exact_weighted_toeplitz_operator=self.use_exact_weighted_toeplitz_operator,
+                batch_size=self.prediction_batch_size,
+                weighted_toeplitz=weighted_toeplitz,
+            )
+        elif method == "stochastic":
+            variance, _ = _predictive_variance_stochastic(
+                X_t,
+                self._variational_state_.delta,
+                self._spectral_state_,
+                cg_tol=self.cg_tol,
+                nufft_eps=self.nufft_eps,
+                n_probes=self.predictive_variance_probes,
+                use_exact_weighted_toeplitz_operator=self.use_exact_weighted_toeplitz_operator,
+                seed=self._predictive_variance_seed(),
+                est_sums=self._get_stochastic_predictive_variance_sums(),
+                weighted_toeplitz=weighted_toeplitz,
+            )
+        else:
+            variance, _ = _predictive_variance_chebyshev(
+                X_t,
+                self._variational_state_.delta,
+                self._spectral_state_,
+                cg_tol=self.cg_tol,
+                nufft_eps=self.nufft_eps,
+                n_nodes_per_dim=self.predictive_variance_chebyshev_nodes,
+                use_exact_weighted_toeplitz_operator=self.use_exact_weighted_toeplitz_operator,
+                batch_size=self.prediction_batch_size,
+                weighted_toeplitz=weighted_toeplitz,
+            )
+        return variance
+
+    def _get_stochastic_predictive_variance_sums(self) -> torch.Tensor:
+        method = self._predictive_variance_method_normalized()
+        if method != "stochastic":
+            raise ValueError("Stochastic predictive variance sums requested while exact mode is active.")
+        if self.predictive_variance_probes <= 0:
+            raise ValueError("predictive_variance_probes must be positive.")
+        if getattr(self, "_stochastic_predictive_variance_sums_", None) is None:
+            sums, info = _estimate_stochastic_variance_sums(
+                self._variational_state_.delta,
+                self._spectral_state_,
+                cg_tol=self.cg_tol,
+                n_probes=self.predictive_variance_probes,
+                use_exact_weighted_toeplitz_operator=self.use_exact_weighted_toeplitz_operator,
+                seed=self._predictive_variance_seed(),
+                weighted_toeplitz=self._get_predictive_weighted_toeplitz(),
+            )
+            self._stochastic_predictive_variance_sums_ = sums
+            self._stochastic_predictive_variance_info_ = info
+        return self._stochastic_predictive_variance_sums_
 
     def _make_likelihood(self) -> _PGLikelihood:
         raise NotImplementedError
@@ -945,6 +1276,9 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
         self._initialize_fit_state(X_t, 0.25 * pg_b_t)
         self._X_train_t_ = X_t
         self._y_train_t_ = y_t
+        self._stochastic_predictive_variance_sums_ = None
+        self._stochastic_predictive_variance_info_ = None
+        self._predictive_weighted_toeplitz_ = None
 
         optimizer = Adam(self.kernel_._gp_params_ref.parameters(), lr=self.lr, maximize=True)
         history: list[dict[str, float]] = []
@@ -977,7 +1311,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
                 n_probes=self.n_e_probes,
                 cg_tol=self.cg_tol,
                 reuse_probes=self.reuse_e_probes,
-                use_toeplitz_warm_start=self.use_toeplitz_warm_start,
+                use_exact_weighted_toeplitz_operator=self.use_exact_weighted_toeplitz_operator,
                 seed=None if self.random_state is None else self.random_state + 1000 * outer,
                 verbose=self.verbose,
             )
@@ -987,7 +1321,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
                 spectral,
                 n_probes=self.n_m_probes,
                 cg_tol=self.cg_tol,
-                use_toeplitz_warm_start=self.use_toeplitz_warm_start,
+                use_exact_weighted_toeplitz_operator=self.use_exact_weighted_toeplitz_operator,
                 seed=None if self.random_state is None else self.random_state + 1000 * outer,
             )
             grad = mstep_out["grad"].real
@@ -1052,19 +1386,20 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
             n_probes=self.n_e_probes,
             cg_tol=self.cg_tol,
             reuse_probes=self.reuse_e_probes,
-            use_toeplitz_warm_start=self.use_toeplitz_warm_start,
+            use_exact_weighted_toeplitz_operator=self.use_exact_weighted_toeplitz_operator,
             seed=None if self.random_state is None else self.random_state + 999_999,
             verbose=self.verbose,
         )
-        beta_mean, beta_cg_iters, _ = _solve_beta_mean(
+        beta_mean, beta_cg_iters = _solve_beta_mean(
             kappa_t,
             self._variational_state_.delta,
             self._spectral_state_,
             cg_tol=self.cg_tol,
-            use_toeplitz_warm_start=self.use_toeplitz_warm_start,
+            use_exact_weighted_toeplitz_operator=self.use_exact_weighted_toeplitz_operator,
         )
         self._beta_mean_ = beta_mean
         self._likelihood_ = likelihood
+        self._predictive_weighted_toeplitz_ = self._get_predictive_weighted_toeplitz()
 
         self.delta_ = self._variational_state_.delta.detach().cpu().numpy()
         self.posterior_mean_ = self._variational_state_.mean.detach().cpu().numpy()
@@ -1130,15 +1465,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
             return self.posterior_var_diag_.copy()
 
         X_t = torch.as_tensor(X_arr, device=self._device_, dtype=self._rdtype_)
-        variance = _predictive_variance(
-            X_t,
-            self._variational_state_.delta,
-            self._spectral_state_,
-            cg_tol=self.cg_tol,
-            nufft_eps=self.nufft_eps,
-            use_toeplitz_warm_start=self.use_toeplitz_warm_start,
-            batch_size=self.prediction_batch_size,
-        )
+        variance = self._predictive_variance_off_train(X_t)
         return variance.detach().cpu().numpy()
 
     def predict_response_mean(self, X):
@@ -1149,16 +1476,13 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
             variance = torch.as_tensor(self.posterior_var_diag_, dtype=self._rdtype_)
         else:
             X_t = torch.as_tensor(X_arr, device=self._device_, dtype=self._rdtype_)
-            mean, variance = _predictive_latent_moments(
+            mean = _predictive_mean(
                 X_t,
                 self._beta_mean_,
-                self._variational_state_.delta,
                 self._spectral_state_,
-                cg_tol=self.cg_tol,
                 nufft_eps=self.nufft_eps,
-                use_toeplitz_warm_start=self.use_toeplitz_warm_start,
-                batch_size=self.prediction_batch_size,
             )
+            variance = self._predictive_variance_off_train(X_t)
 
         response = self._likelihood_.response_mean(mean, variance)
         return response.detach().cpu().numpy()
@@ -1218,9 +1542,12 @@ class PolyagammaGPNegativeBinomialRegressor(_BasePolyagammaGPEstimator, Regresso
         spectral_eps: float = 1e-4,
         trunc_eps: float = 1e-4,
         jitter: float = 1e-8,
-        use_toeplitz_warm_start: bool = True,
+        use_exact_weighted_toeplitz_operator: bool = True,
         reuse_e_probes: bool = True,
         prediction_batch_size: int | None = 64,
+        predictive_variance_method: str = "exact",
+        predictive_variance_probes: int = 16,
+        predictive_variance_chebyshev_nodes: int = 7,
         warm_start: bool = False,
         random_state: int | None = None,
         device: str = "auto",
@@ -1246,9 +1573,12 @@ class PolyagammaGPNegativeBinomialRegressor(_BasePolyagammaGPEstimator, Regresso
             spectral_eps=spectral_eps,
             trunc_eps=trunc_eps,
             jitter=jitter,
-            use_toeplitz_warm_start=use_toeplitz_warm_start,
+            use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
             reuse_e_probes=reuse_e_probes,
             prediction_batch_size=prediction_batch_size,
+            predictive_variance_method=predictive_variance_method,
+            predictive_variance_probes=predictive_variance_probes,
+            predictive_variance_chebyshev_nodes=predictive_variance_chebyshev_nodes,
             warm_start=warm_start,
             random_state=random_state,
             device=device,

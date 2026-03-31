@@ -14,21 +14,28 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from vanilla_gp_sampling import sample_bernoulli_gp
+from vanilla_gp_sampling import sample_gp_spectral_approx
 
 from pg_classifier import (
     PolyagammaGPClassifier,
     PolyagammaGPNegativeBinomialRegressor,
     _PGBernoulliLikelihood,
     _VariationalState,
+    _build_weighted_toeplitz,
     _build_spectral_state,
     _compute_mstep_gradient,
     _dense_pg_reference_gradient,
     _expected_log_sigmoid_negative_gaussian,
     _make_kernel,
+    _make_feature_space_solver,
+    _make_sigma_apply,
     _negative_binomial_total_count_gradient,
     _pg_omega_expectation,
     _predictive_variance,
+    _predictive_variance_chebyshev,
+    _predictive_variance_stochastic,
     _run_estep,
+    _solve_beta_mean,
     approximate_logistic_gaussian_prob,
     negative_binomial_gaussian_mean,
 )
@@ -189,7 +196,6 @@ def test_feature_space_mstep_matches_dense_pg_reference_small_problem():
         n_probes=8,
         cg_tol=1e-7,
         reuse_probes=True,
-        use_toeplitz_warm_start=True,
         seed=0,
         verbose=0,
     )
@@ -199,7 +205,6 @@ def test_feature_space_mstep_matches_dense_pg_reference_small_problem():
         spectral,
         n_probes=256,
         cg_tol=1e-7,
-        use_toeplitz_warm_start=True,
         seed=0,
     )
     reference = _dense_pg_reference_gradient(
@@ -215,6 +220,314 @@ def test_feature_space_mstep_matches_dense_pg_reference_small_problem():
     assert torch.sign(mstep["grad"][1]) == torch.sign(reference[1])
     assert abs((mstep["grad"][0] - reference[0]).item()) / abs(reference[0].item()) < 0.6
     assert abs((mstep["grad"][1] - reference[1]).item()) < 0.15
+
+
+def test_weighted_toeplitz_estep_matches_nufft_path_small_problem():
+    torch.manual_seed(11)
+    device = torch.device("cpu")
+    rdtype = torch.float64
+    cdtype = torch.complex128
+
+    X = torch.rand(16, 1, dtype=rdtype, device=device) * 2 - 1
+    y, _ = sample_bernoulli_gp(X, length_scale=0.35, variance=1.0)
+    y = y.to(device=device, dtype=rdtype)
+
+    kernel = _make_kernel(
+        "squared_exponential",
+        dimension=1,
+        lengthscale=0.3,
+        variance=1.0,
+    )
+    spectral = _build_spectral_state(
+        X,
+        kernel,
+        spectral_eps=1e-4,
+        trunc_eps=1e-4,
+        nufft_eps=1e-7,
+        rdtype=rdtype,
+        cdtype=cdtype,
+        device=device,
+    )
+    likelihood = _PGBernoulliLikelihood()
+    kappa = likelihood.kappa(y)
+    pg_b = likelihood.pg_b(y)
+    base_delta = torch.full((X.shape[0],), 0.25, dtype=rdtype, device=device)
+
+    nufft_state, _ = _run_estep(
+        y,
+        kappa,
+        pg_b,
+        likelihood,
+        _VariationalState(delta=base_delta.clone()),
+        spectral,
+        max_iters=1,
+        rho0=0.7,
+        gamma=1e-3,
+        tol=1e-8,
+        n_probes=8,
+        cg_tol=1e-7,
+        reuse_probes=True,
+        use_exact_weighted_toeplitz_operator=False,
+        seed=123,
+        verbose=0,
+    )
+    toeplitz_state, _ = _run_estep(
+        y,
+        kappa,
+        pg_b,
+        likelihood,
+        _VariationalState(delta=base_delta.clone()),
+        spectral,
+        max_iters=1,
+        rho0=0.7,
+        gamma=1e-3,
+        tol=1e-8,
+        n_probes=8,
+        cg_tol=1e-7,
+        reuse_probes=True,
+        use_exact_weighted_toeplitz_operator=True,
+        seed=123,
+        verbose=0,
+    )
+
+    assert torch.allclose(nufft_state.mean, toeplitz_state.mean, atol=5e-6, rtol=5e-6)
+    assert torch.allclose(nufft_state.sigma_diag, toeplitz_state.sigma_diag, atol=5e-6, rtol=5e-6)
+    assert torch.allclose(nufft_state.delta, toeplitz_state.delta, atol=5e-6, rtol=5e-6)
+
+
+def test_weighted_toeplitz_beta_mean_matches_nufft_path_small_problem():
+    torch.manual_seed(13)
+    device = torch.device("cpu")
+    rdtype = torch.float64
+    cdtype = torch.complex128
+
+    X = torch.rand(14, 1, dtype=rdtype, device=device) * 2 - 1
+    y, _ = sample_bernoulli_gp(X, length_scale=0.4, variance=1.0)
+    y = y.to(device=device, dtype=rdtype)
+
+    kernel = _make_kernel(
+        "squared_exponential",
+        dimension=1,
+        lengthscale=0.35,
+        variance=1.0,
+    )
+    spectral = _build_spectral_state(
+        X,
+        kernel,
+        spectral_eps=1e-4,
+        trunc_eps=1e-4,
+        nufft_eps=1e-7,
+        rdtype=rdtype,
+        cdtype=cdtype,
+        device=device,
+    )
+    likelihood = _PGBernoulliLikelihood()
+    kappa = likelihood.kappa(y)
+    pg_b = likelihood.pg_b(y)
+    variational = _VariationalState(delta=torch.full((X.shape[0],), 0.25, dtype=rdtype, device=device))
+    variational, _ = _run_estep(
+        y,
+        kappa,
+        pg_b,
+        likelihood,
+        variational,
+        spectral,
+        max_iters=1,
+        rho0=0.7,
+        gamma=1e-3,
+        tol=1e-6,
+        n_probes=8,
+        cg_tol=1e-7,
+        reuse_probes=True,
+        seed=0,
+        verbose=0,
+    )
+
+    beta_nufft, *_ = _solve_beta_mean(
+        kappa,
+        variational.delta,
+        spectral,
+        cg_tol=1e-7,
+        use_exact_weighted_toeplitz_operator=False,
+    )
+    beta_toeplitz, *_ = _solve_beta_mean(
+        kappa,
+        variational.delta,
+        spectral,
+        cg_tol=1e-7,
+        use_exact_weighted_toeplitz_operator=True,
+    )
+
+    assert torch.allclose(beta_nufft, beta_toeplitz, atol=5e-6, rtol=5e-6)
+
+
+def test_weighted_toeplitz_training_solve_matches_dense_feature_space():
+    torch.manual_seed(123)
+    device = torch.device("cpu")
+    rdtype = torch.float64
+    cdtype = torch.complex128
+
+    X = torch.rand(18, 1, dtype=rdtype, device=device) * 2 - 1
+    y, _ = sample_bernoulli_gp(X, length_scale=0.35, variance=1.0)
+    y = y.to(device=device, dtype=rdtype)
+
+    kernel = _make_kernel(
+        "squared_exponential",
+        dimension=1,
+        lengthscale=0.3,
+        variance=1.0,
+    )
+    spectral = _build_spectral_state(
+        X,
+        kernel,
+        spectral_eps=1e-4,
+        trunc_eps=1e-4,
+        nufft_eps=1e-7,
+        rdtype=rdtype,
+        cdtype=cdtype,
+        device=device,
+    )
+    likelihood = _PGBernoulliLikelihood()
+    kappa = likelihood.kappa(y)
+    pg_b = likelihood.pg_b(y)
+    variational = _VariationalState(delta=torch.full((X.shape[0],), 0.25, dtype=rdtype, device=device))
+    variational, _ = _run_estep(
+        y,
+        kappa,
+        pg_b,
+        likelihood,
+        variational,
+        spectral,
+        max_iters=1,
+        rho0=0.7,
+        gamma=1e-3,
+        tol=1e-6,
+        n_probes=8,
+        cg_tol=1e-7,
+        reuse_probes=True,
+        use_exact_weighted_toeplitz_operator=False,
+        seed=0,
+        verbose=0,
+    )
+
+    delta = variational.delta
+    omega = delta.to(dtype=cdtype)
+    Ds = torch.sqrt(torch.clamp(spectral.ws2.real, min=1e-14)).to(dtype=cdtype)
+    F = torch.exp(2j * torch.pi * (X @ spectral.xis.T)).to(dtype=cdtype)
+    A_dense = torch.eye(F.shape[1], dtype=cdtype, device=device) + (
+        Ds[:, None] * (F.conj().T @ (omega[:, None] * F)) * Ds[None, :]
+    )
+    A_dense = 0.5 * (A_dense + A_dense.conj().T)
+
+    v = torch.randn(F.shape[1], dtype=cdtype, device=device)
+    from pg_classifier import _build_weighted_toeplitz
+    T_weighted = _build_weighted_toeplitz(delta.to(dtype=cdtype), spectral)
+    A_toeplitz_v = v + Ds * T_weighted(Ds * v)
+    act_rel = (torch.linalg.norm(A_toeplitz_v - A_dense @ v) / torch.linalg.norm(A_dense @ v)).item()
+
+    solve_A_beta, _, _ = _make_feature_space_solver(
+        delta,
+        spectral,
+        cg_tol=1e-10,
+        use_exact_weighted_toeplitz_operator=True,
+    )
+    q = spectral.fadj(kappa.to(dtype=cdtype))
+    rhs = Ds * q
+    beta_dense = torch.linalg.solve(A_dense, rhs[:, None]).squeeze(1) / Ds
+    beta_toeplitz, _ = solve_A_beta(q)
+    beta_rel = (torch.linalg.norm(beta_toeplitz - beta_dense) / torch.linalg.norm(beta_dense)).item()
+
+    sigma_apply, _ = _make_sigma_apply(
+        spectral,
+        delta,
+        cg_tol=1e-10,
+        use_exact_weighted_toeplitz_operator=True,
+    )
+    Z = torch.randn(4, X.shape[0], dtype=rdtype, device=device)
+    sigma_toeplitz = sigma_apply(Z)
+    Psi = F * spectral.ws[None, :]
+    K = Psi @ Psi.conj().T
+    Sigma_dense = torch.linalg.solve(
+        torch.eye(X.shape[0], dtype=cdtype, device=device) + K * omega[None, :],
+        K,
+    )
+    sigma_dense = (Sigma_dense @ Z.to(dtype=cdtype).T).T.real
+    sigma_rel = (torch.linalg.norm(sigma_toeplitz - sigma_dense) / torch.linalg.norm(sigma_dense)).item()
+
+    assert act_rel < 1e-7
+    assert beta_rel < 1e-7
+    assert sigma_rel < 1e-7
+
+
+def test_weighted_toeplitz_predictive_variance_matches_nufft_exact_path():
+    torch.manual_seed(17)
+    device = torch.device("cpu")
+    rdtype = torch.float64
+    cdtype = torch.complex128
+
+    X = torch.rand(12, 1, dtype=rdtype, device=device) * 2 - 1
+    X_test = torch.linspace(-0.95, 0.95, 7, dtype=rdtype, device=device).unsqueeze(-1)
+    y, _ = sample_bernoulli_gp(X, length_scale=0.4, variance=1.0)
+    y = y.to(device=device, dtype=rdtype)
+
+    kernel = _make_kernel(
+        "squared_exponential",
+        dimension=1,
+        lengthscale=0.35,
+        variance=1.0,
+    )
+    spectral = _build_spectral_state(
+        X,
+        kernel,
+        spectral_eps=1e-4,
+        trunc_eps=1e-4,
+        nufft_eps=1e-7,
+        rdtype=rdtype,
+        cdtype=cdtype,
+        device=device,
+    )
+    likelihood = _PGBernoulliLikelihood()
+    kappa = likelihood.kappa(y)
+    pg_b = likelihood.pg_b(y)
+    variational = _VariationalState(delta=torch.full((X.shape[0],), 0.25, dtype=rdtype, device=device))
+    variational, _ = _run_estep(
+        y,
+        kappa,
+        pg_b,
+        likelihood,
+        variational,
+        spectral,
+        max_iters=1,
+        rho0=0.7,
+        gamma=1e-3,
+        tol=1e-6,
+        n_probes=8,
+        cg_tol=1e-7,
+        reuse_probes=True,
+        seed=0,
+        verbose=0,
+    )
+
+    var_nufft = _predictive_variance(
+        X_test,
+        variational.delta,
+        spectral,
+        cg_tol=1e-7,
+        nufft_eps=1e-7,
+        use_exact_weighted_toeplitz_operator=False,
+        batch_size=4,
+    )
+    var_toep = _predictive_variance(
+        X_test,
+        variational.delta,
+        spectral,
+        cg_tol=1e-7,
+        nufft_eps=1e-7,
+        use_exact_weighted_toeplitz_operator=True,
+        batch_size=4,
+    )
+
+    assert torch.allclose(var_nufft, var_toep, atol=5e-6, rtol=5e-6)
 
 
 def test_predictive_variance_matches_dense_feature_space_reference():
@@ -262,7 +575,6 @@ def test_predictive_variance_matches_dense_feature_space_reference():
         n_probes=8,
         cg_tol=1e-8,
         reuse_probes=True,
-        use_toeplitz_warm_start=True,
         seed=0,
         verbose=0,
     )
@@ -272,7 +584,6 @@ def test_predictive_variance_matches_dense_feature_space_reference():
         spectral,
         cg_tol=1e-8,
         nufft_eps=1e-7,
-        use_toeplitz_warm_start=True,
         batch_size=2,
     )
 
@@ -300,6 +611,310 @@ def test_predictive_variance_matches_dense_feature_space_reference():
 
     assert torch.all(variance >= 0.0)
     assert torch.allclose(variance, reference, atol=1e-5, rtol=1e-4)
+
+
+def test_stochastic_predictive_variance_tracks_exact_small_problem():
+    torch.manual_seed(19)
+    device = torch.device("cpu")
+    rdtype = torch.float64
+    cdtype = torch.complex128
+
+    X = torch.rand(12, 1, dtype=rdtype, device=device) * 2 - 1
+    X_test = torch.linspace(-1.0, 1.0, 6, dtype=rdtype, device=device).unsqueeze(-1)
+    y, _ = sample_bernoulli_gp(X, length_scale=0.4, variance=0.9)
+    y = y.to(device=device, dtype=rdtype)
+
+    kernel = _make_kernel(
+        "squared_exponential",
+        dimension=1,
+        lengthscale=0.35,
+        variance=0.9,
+    )
+    spectral = _build_spectral_state(
+        X,
+        kernel,
+        spectral_eps=1e-3,
+        trunc_eps=1e-3,
+        nufft_eps=1e-7,
+        rdtype=rdtype,
+        cdtype=cdtype,
+        device=device,
+    )
+    likelihood = _PGBernoulliLikelihood()
+    kappa = likelihood.kappa(y)
+    pg_b = likelihood.pg_b(y)
+    variational = _VariationalState(delta=torch.full((X.shape[0],), 0.25, dtype=rdtype, device=device))
+    variational, _ = _run_estep(
+        y,
+        kappa,
+        pg_b,
+        likelihood,
+        variational,
+        spectral,
+        max_iters=1,
+        rho0=0.7,
+        gamma=1e-3,
+        tol=1e-6,
+        n_probes=8,
+        cg_tol=1e-8,
+        reuse_probes=True,
+        seed=0,
+        verbose=0,
+    )
+
+    exact = _predictive_variance(
+        X_test,
+        variational.delta,
+        spectral,
+        cg_tol=1e-8,
+        nufft_eps=1e-7,
+        batch_size=3,
+    )
+    stochastic, info = _predictive_variance_stochastic(
+        X_test,
+        variational.delta,
+        spectral,
+        cg_tol=1e-8,
+        nufft_eps=1e-7,
+        n_probes=256,
+        seed=123,
+    )
+
+    assert info["n_probes"] == 256
+    assert torch.all(torch.isfinite(stochastic))
+    assert torch.all(stochastic >= 0.0)
+    assert torch.max(torch.abs(stochastic - exact)).item() < 0.12
+    assert torch.mean(torch.abs(stochastic - exact)).item() < 0.05
+
+
+def test_chebyshev_predictive_variance_tracks_exact_small_problem():
+    torch.manual_seed(31)
+    device = torch.device("cpu")
+    rdtype = torch.float64
+    cdtype = torch.complex128
+
+    X = torch.rand(12, 2, dtype=rdtype, device=device) * 2 - 1
+    X_test = torch.rand(18, 2, dtype=rdtype, device=device) * 2 - 1
+    y, _ = sample_bernoulli_gp(X, length_scale=0.4, variance=0.9)
+    y = y.to(device=device, dtype=rdtype)
+
+    kernel = _make_kernel(
+        "squared_exponential",
+        dimension=2,
+        lengthscale=0.35,
+        variance=0.9,
+    )
+    spectral = _build_spectral_state(
+        X,
+        kernel,
+        spectral_eps=1e-3,
+        trunc_eps=1e-3,
+        nufft_eps=1e-7,
+        rdtype=rdtype,
+        cdtype=cdtype,
+        device=device,
+    )
+    likelihood = _PGBernoulliLikelihood()
+    kappa = likelihood.kappa(y)
+    pg_b = likelihood.pg_b(y)
+    variational = _VariationalState(delta=torch.full((X.shape[0],), 0.25, dtype=rdtype, device=device))
+    variational, _ = _run_estep(
+        y,
+        kappa,
+        pg_b,
+        likelihood,
+        variational,
+        spectral,
+        max_iters=1,
+        rho0=0.7,
+        gamma=1e-3,
+        tol=1e-6,
+        n_probes=8,
+        cg_tol=1e-8,
+        reuse_probes=True,
+        seed=0,
+        verbose=0,
+    )
+
+    exact = _predictive_variance(
+        X_test,
+        variational.delta,
+        spectral,
+        cg_tol=1e-8,
+        nufft_eps=1e-7,
+        batch_size=6,
+    )
+    cheb, info = _predictive_variance_chebyshev(
+        X_test,
+        variational.delta,
+        spectral,
+        cg_tol=1e-8,
+        nufft_eps=1e-7,
+        n_nodes_per_dim=7,
+        batch_size=6,
+    )
+
+    assert info["n_nodes_total"] == 49.0
+    assert torch.all(torch.isfinite(cheb))
+    assert torch.all(cheb >= 0.0)
+    assert torch.max(torch.abs(cheb - exact)).item() < 0.08
+    assert torch.mean(torch.abs(cheb - exact)).item() < 0.03
+
+
+def test_cached_weighted_toeplitz_matches_uncached_predictive_variance_paths():
+    torch.manual_seed(41)
+    device = torch.device("cpu")
+    rdtype = torch.float64
+    cdtype = torch.complex128
+
+    X = torch.rand(14, 2, dtype=rdtype, device=device) * 2 - 1
+    X_test = torch.rand(19, 2, dtype=rdtype, device=device) * 2 - 1
+    y, _ = sample_bernoulli_gp(X, length_scale=0.4, variance=0.9)
+    y = y.to(device=device, dtype=rdtype)
+
+    kernel = _make_kernel(
+        "squared_exponential",
+        dimension=2,
+        lengthscale=0.35,
+        variance=0.9,
+    )
+    spectral = _build_spectral_state(
+        X,
+        kernel,
+        spectral_eps=1e-3,
+        trunc_eps=1e-3,
+        nufft_eps=1e-7,
+        rdtype=rdtype,
+        cdtype=cdtype,
+        device=device,
+    )
+    likelihood = _PGBernoulliLikelihood()
+    kappa = likelihood.kappa(y)
+    pg_b = likelihood.pg_b(y)
+    variational = _VariationalState(delta=torch.full((X.shape[0],), 0.25, dtype=rdtype, device=device))
+    variational, _ = _run_estep(
+        y,
+        kappa,
+        pg_b,
+        likelihood,
+        variational,
+        spectral,
+        max_iters=1,
+        rho0=0.7,
+        gamma=1e-3,
+        tol=1e-6,
+        n_probes=8,
+        cg_tol=1e-8,
+        reuse_probes=True,
+        use_exact_weighted_toeplitz_operator=True,
+        seed=0,
+        verbose=0,
+    )
+
+    weighted_toeplitz = _build_weighted_toeplitz(
+        variational.delta.to(dtype=spectral.ws.dtype),
+        spectral,
+    )
+
+    exact_uncached = _predictive_variance(
+        X_test,
+        variational.delta,
+        spectral,
+        cg_tol=1e-8,
+        nufft_eps=1e-7,
+        use_exact_weighted_toeplitz_operator=True,
+        batch_size=6,
+    )
+    exact_cached = _predictive_variance(
+        X_test,
+        variational.delta,
+        spectral,
+        cg_tol=1e-8,
+        nufft_eps=1e-7,
+        use_exact_weighted_toeplitz_operator=True,
+        batch_size=6,
+        weighted_toeplitz=weighted_toeplitz,
+    )
+    cheb_uncached, _ = _predictive_variance_chebyshev(
+        X_test,
+        variational.delta,
+        spectral,
+        cg_tol=1e-8,
+        nufft_eps=1e-7,
+        n_nodes_per_dim=7,
+        use_exact_weighted_toeplitz_operator=True,
+        batch_size=6,
+    )
+    cheb_cached, _ = _predictive_variance_chebyshev(
+        X_test,
+        variational.delta,
+        spectral,
+        cg_tol=1e-8,
+        nufft_eps=1e-7,
+        n_nodes_per_dim=7,
+        use_exact_weighted_toeplitz_operator=True,
+        batch_size=6,
+        weighted_toeplitz=weighted_toeplitz,
+    )
+
+    assert torch.allclose(exact_uncached, exact_cached, atol=1e-10, rtol=1e-10)
+    assert torch.allclose(cheb_uncached, cheb_cached, atol=1e-10, rtol=1e-10)
+
+
+def test_spectral_gp_sampler_matches_approximate_kernel_covariance():
+    torch.manual_seed(23)
+    device = torch.device("cpu")
+    rdtype = torch.float64
+    cdtype = torch.complex128
+
+    X = torch.rand(6, 1, dtype=rdtype, device=device) * 2 - 1
+    n_samples = 512
+    length_scale = 0.45
+    variance = 0.9
+    spectral_eps = 1e-4
+    trunc_eps = 1e-4
+    nufft_eps = 1e-7
+
+    samples = sample_gp_spectral_approx(
+        X,
+        num_samples=n_samples,
+        length_scale=length_scale,
+        variance=variance,
+        spectral_eps=spectral_eps,
+        trunc_eps=trunc_eps,
+        nufft_eps=nufft_eps,
+        seed=123,
+    )
+
+    kernel = _make_kernel(
+        "squared_exponential",
+        dimension=1,
+        lengthscale=length_scale,
+        variance=variance,
+    )
+    spectral = _build_spectral_state(
+        X,
+        kernel,
+        spectral_eps=spectral_eps,
+        trunc_eps=trunc_eps,
+        nufft_eps=nufft_eps,
+        rdtype=rdtype,
+        cdtype=cdtype,
+        device=device,
+    )
+    F_train = torch.exp(2.0 * math.pi * 1j * (X @ spectral.xis.T)).to(dtype=cdtype)
+    K_approx = (F_train @ torch.diag(spectral.ws2.to(dtype=cdtype)) @ F_train.T.conj()).real
+
+    centered = samples - samples.mean(dim=1, keepdim=True)
+    empirical = centered @ centered.T / samples.shape[1]
+
+    diag_rel = torch.linalg.norm(torch.diag(empirical) - torch.diag(K_approx)) / torch.linalg.norm(torch.diag(K_approx))
+    fro_rel = torch.linalg.norm(empirical - K_approx) / torch.linalg.norm(K_approx)
+
+    assert samples.shape == (X.shape[0], n_samples)
+    assert torch.all(torch.isfinite(samples))
+    assert fro_rel.item() < 0.35
+    assert diag_rel.item() < 0.20
 
 
 def test_negative_binomial_regressor_fixed_total_count_api():
@@ -358,6 +973,71 @@ def test_negative_binomial_regressor_fixed_total_count_api():
         total_count=total_count,
     ).cpu().numpy()
     assert np.allclose(mean_count_train, expected_train)
+
+
+def test_classifier_stochastic_predictive_variance_api_is_reproducible():
+    torch.manual_seed(29)
+    X = torch.rand(18, 1, dtype=torch.float64) * 2 - 1
+    y, _ = sample_bernoulli_gp(X, length_scale=0.4, variance=1.0)
+    X_np = X.cpu().numpy()
+    y_np = y.cpu().numpy().astype(int)
+    X_test = np.linspace(-1.0, 1.0, 13, dtype=np.float64).reshape(-1, 1)
+
+    clf = PolyagammaGPClassifier(
+        lengthscale_init=0.35,
+        variance_init=1.0,
+        max_iter=2,
+        e_step_iters=1,
+        final_e_step_iters=1,
+        n_e_probes=4,
+        n_m_probes=6,
+        predictive_variance_method="stochastic",
+        predictive_variance_probes=64,
+        random_state=777,
+    )
+    clf.fit(X_np, y_np)
+    var1 = clf.predictive_variance(X_test)
+    var2 = clf.predictive_variance(X_test)
+    proba = clf.predict_proba(X_test)
+
+    assert np.all(np.isfinite(var1))
+    assert np.all(var1 >= 0.0)
+    assert np.allclose(var1, var2)
+    assert np.all(np.isfinite(proba))
+    assert np.allclose(proba.sum(axis=1), 1.0)
+    assert clf._stochastic_predictive_variance_info_["n_probes"] == 64
+
+
+def test_classifier_chebyshev_predictive_variance_api_is_reproducible():
+    torch.manual_seed(37)
+    X = torch.rand(18, 2, dtype=torch.float64) * 2 - 1
+    y, _ = sample_bernoulli_gp(X, length_scale=0.4, variance=1.0)
+    X_np = X.cpu().numpy()
+    y_np = y.cpu().numpy().astype(int)
+    X_test = np.random.default_rng(0).uniform(-1.1, 1.1, size=(21, 2))
+
+    clf = PolyagammaGPClassifier(
+        lengthscale_init=0.35,
+        variance_init=1.0,
+        max_iter=2,
+        e_step_iters=1,
+        final_e_step_iters=1,
+        n_e_probes=4,
+        n_m_probes=6,
+        predictive_variance_method="chebyshev",
+        predictive_variance_chebyshev_nodes=7,
+        random_state=777,
+    )
+    clf.fit(X_np, y_np)
+    var1 = clf.predictive_variance(X_test)
+    var2 = clf.predictive_variance(X_test)
+    proba = clf.predict_proba(X_test)
+
+    assert np.all(np.isfinite(var1))
+    assert np.all(var1 >= 0.0)
+    assert np.allclose(var1, var2)
+    assert np.all(np.isfinite(proba))
+    assert np.allclose(proba.sum(axis=1), 1.0)
 
 
 def test_negative_binomial_regressor_can_learn_total_count():

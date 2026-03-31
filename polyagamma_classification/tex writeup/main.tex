@@ -252,14 +252,137 @@ Solve for $\alpha$:
 &\text{ solve the above for $u$ and substitute } v = \Phi u.
 \end{align}
 Note that in \ref{image}, we can rearrange and see that $v \in \operatorname{Range}(\Phi)$. Also in \ref{cancel}, we can "cancel" the $\Phi$ on both sides since $\Phi$ is injective, since $\{\exp(i\omega_jx)\}_{j\in [M]}$ are linearly independent. 
+\paragraph{Stable feature-space path actually used in the E-step.}
+The derivation above gives the direct identity
+\[
+\boxed{
+\Sigma z
+=
+\Phi (I + \Phi^* \Delta \Phi)^{-1}\Phi^* z.
+}
+\]
+This is the numerically stable version of the E-step linear solve. In code, the feature-space system is
+\[
+A_E u = r_E,
+\qquad
+A_E := I + \Phi^* \Delta \Phi = I + D F^* \Delta F D,
+\qquad
+r_E := \Phi^* z = D F^* z,
+\]
+and once $u$ is solved for, we return
+\[
+\Sigma z = \Phi u = F D u.
+\]
+
+Previously we used the Woodbury-style reconstruction
+\[
+\Sigma
+=
+K - K(I+\Delta K)^{-1}\Delta K,
+\]
+which gives
+\[
+\Sigma z = Kz - K(I+\Delta K)^{-1}\Delta K z.
+\]
+If we write the correction term in feature space, this becomes
+\[
+q_E := \Phi^* \Delta K z,
+\qquad
+(I+\Phi^* \Delta \Phi)u_{\rm corr}=q_E,
+\qquad
+\Sigma z = Kz - \Phi u_{\rm corr}.
+\]
+So the \emph{operator} being inverted is the same in both formulations, but the right-hand side and reconstruction differ:
+\begin{align*}
+\text{old path:}\quad
+&(I+\Phi^* \Delta \Phi)u_{\rm corr}=\Phi^* \Delta K z,
+\qquad
+\Sigma z = Kz - \Phi u_{\rm corr},\\
+\text{new path:}\quad
+&(I+\Phi^* \Delta \Phi)u=\Phi^* z,
+\qquad
+\Sigma z = \Phi u.
+\end{align*}
+At large $n$, the old path is unstable because $Kz$ and $\Phi u_{\rm corr}$ can each be very large while their difference $\Sigma z$ is much smaller, so small solve error is amplified by catastrophic cancellation. The new path avoids this subtraction entirely.
+
 \begin{enumerate}
-  \item Each CG iteration requires two NUFFT applies of $I + DF^*\Delta FD$.
+  \item In the direct feature-space formulation, each CG iteration applies $I + DF^*\Delta FD$ to the current feature vector.
   \item Plus two NUFFT setups.
-  \item We can speed up this solve by preconditioning with the approximation $\Delta = \delta I$ where $\delta$ is the mean of the $\Delta$ diagonal matrix. This cuts down computations dramatically if $\Delta$ is anywhere close to constant. Ie solve
-  $$(I + \bar{\delta} \Phi^* \Phi)u = \Phi^* z$$
-  In some arbitrary case I tested, from 100 CG solves down to 7. 
-  
+  \item A warm start can be obtained by replacing $\Delta$ by $\bar\delta I$, solving the Toeplitz surrogate once, and using that approximate solution as the initial guess for the exact CG solve.
 \end{enumerate}
+
+\paragraph{Toeplitz preconditioner for the E-step solve.}
+Write the feature-space linear system in the form
+\[
+A_E u = r_E,
+\qquad
+A_E := I + \Phi^* \Delta \Phi = I + D F^* \Delta F D,
+\qquad
+r_E := \Phi^* z = D F^* z.
+\]
+Let
+\[
+\bar\delta := \frac{1}{n}\sum_{i=1}^n \Delta_{ii}.
+\]
+If $\Delta$ is close to a scalar multiple of the identity, then a natural approximation is
+\[
+M_E := I + \bar\delta \Phi^* \Phi.
+\]
+Since $\Phi = F D$, this becomes
+\[
+M_E = I + \bar\delta D(F^*F)D.
+\]
+On the tensor grid used by the spectral approximation, the operator $F^*F$ is applied through the Toeplitz convolution operator $T$, so in code we use
+\[
+M_E \approx I + \bar\delta D T D.
+\]
+Instead of running plain CG on $A_E u = r_E$, we solve the left-preconditioned system
+\[
+M_E^{-1} A_E u = M_E^{-1} r_E.
+\]
+Each outer iteration still applies the exact operator $A_E$, so it still costs two NUFFT applications. The point is that the preconditioner application
+\[
+v \mapsto M_E^{-1} v
+\]
+is much cheaper, because it is computed by solving
+\[
+(I + \bar\delta D T D)x = v
+\]
+using only Toeplitz matvecs. In practice we do not form $M_E^{-1}$ explicitly; rather, each call to $M_E^{-1}v$ is approximated by an inner CG solve on the Toeplitz system above. Thus the implementation is an inexact left-preconditioned CG method whose expensive work remains in the outer NUFFT-backed iterations.
+
+The older warm-start idea corresponds to solving
+\[
+M_E x_0 = r_E
+\]
+once and then using $x_0$ as the initial iterate for the exact solve. Preconditioning is stronger: it uses $M_E^{-1}$ at every outer iteration rather than only once at the beginning.
+
+\paragraph{Toeplitz preconditioner for the M-step solve.}
+The same idea applies to the whitened Hermitian feature-space system used in the revised $M$-step. There the linear operator is
+\[
+A_M := I + S,
+\qquad
+S = D^{1/2} F^* \Omega F D^{1/2},
+\]
+where $\Omega = \Delta$ is diagonal and $D^{1/2}$ denotes the diagonal matrix of square-root spectral weights. If we define
+\[
+\bar\omega := \frac{1}{n}\sum_{i=1}^n \Omega_{ii},
+\]
+then the Toeplitz surrogate is
+\[
+M_M := I + \bar\omega D^{1/2} T D^{1/2}.
+\]
+The preconditioned system is
+\[
+M_M^{-1} A_M y = M_M^{-1} r_M.
+\]
+Again, each outer iteration applies the exact NUFFT-backed operator $A_M$, while each preconditioner application is carried out by an inner Toeplitz-only solve
+\[
+(I + \bar\omega D^{1/2} T D^{1/2})x = v.
+\]
+This is the same operator that appears in the predictive-variance computation, so the same Toeplitz preconditioner can be reused there as well.
+
+\paragraph{When is this useful?}
+The approximation is best when $\Delta$ is reasonably close to $\bar\delta I$ (or, in the $M$-step, when $\Omega$ is close to $\bar\omega I$). In that regime, the preconditioner can cut the number of expensive outer NUFFT iterations dramatically. When the spectral system dimension $M$ is itself very large, the extra inner Toeplitz solves may not always be favorable, so this is best exposed as an optional solver mode rather than hard-coded as the only strategy.
 
 \section{M step}
 
@@ -389,6 +512,7 @@ Note actualy best to solve
     &\implies (I+ DF^* \Omega FD)DF^* \alpha = DF^*z
 \end{align}
 so that we have a hermitian system and cg works better. 
+
 
 
 
@@ -571,11 +695,7 @@ Hence
 \mu_* = \psi_*^* m_u.
 }
 \]
-The important point is that this is \emph{not} obtained by directly simplifying
-\[
-DF^*(FD^2F^*)^{-1}FD.
-\]
-Instead, the simplification comes from the push-through identity above, together with the feature-space solve defining $m_u$.
+
 
 To connect back to Term 1 in the M-step, define
 \[
@@ -638,7 +758,129 @@ then compute
 \sigma_*^2 = \psi_*^* u_*.
 \]
 For a batch of test points, solve these systems simultaneously with batched CG.
+\subsection{Stochastic predictive variance via diagonal sums}
+The exact formula above is still expensive for large numbers of test points,
+because it requires solving the same linear system against many different
+right-hand sides. In the PolyGamma case we can reuse the same diagonal-sum idea
+from the conjugate setting, because the predictive variance is still a
+quadratic form in the Fourier features.
 
+Write
+\[
+A := I + B = I + D F^* \Delta F D,
+\qquad
+G := D A^{-1} D.
+\]
+If $\varphi_*$ denotes the unweighted Fourier row at $x_*$ and
+$\psi_* = D\varphi_*$, then
+\[
+\sigma_*^2
+  =
+  \psi_*^* A^{-1}\psi_*
+  =
+  \varphi_*^* G \varphi_*.
+\]
+Expanding this entrywise gives
+\[
+\sigma_*^2
+  =
+  \sum_{j=1}^{M^d}\sum_{\ell=1}^{M^d}
+  e^{2\pi i \langle \xi_\ell - \xi_j, x_* \rangle}\,G_{j\ell}.
+\]
+Because the frequencies lie on a tensor grid, $\xi_j = h m_j$ with
+$m_j \in \{-(M-1)/2,\ldots,(M-1)/2\}^d$, the differences
+$\xi_\ell - \xi_j$ also lie on a grid. Therefore
+\[
+\sigma_*^2
+  =
+  \sum_{r \in \{-(M-1),\ldots,M-1\}^d}
+  e^{2\pi i h \langle x_*, r \rangle}\, c[r],
+\]
+where the offset-diagonal sums are
+\[
+\boxed{
+c[r]
+  :=
+  \sum_{j=1}^{M^d}\sum_{\ell=1}^{M^d}
+  G_{j\ell}\,1[m_\ell - m_j = r].
+}
+\]
+Once the coefficients $c[r]$ are known, all predictive variances on a test set
+are obtained by a single Type-2 NUFFT on the $(2M-1)^d$ grid of offsets.
+
+We estimate $c[r]$ stochastically. Let
+$\eta^{(s)} \in \{-1,1\}^{M^d}$ be i.i.d.\ Rademacher probes. For each probe,
+solve
+\[
+A \beta^{(s)} = D \eta^{(s)},
+\]
+using exactly the same feature-space CG solver as in the $E$-step and revised
+$M$-step, with the same Toeplitz warm start or Toeplitz preconditioner if
+desired. Define
+\[
+\gamma^{(s)} := D \beta^{(s)}.
+\]
+Since $\beta^{(s)} = A^{-1} D \eta^{(s)}$, we have
+\[
+\gamma^{(s)} = D A^{-1} D \eta^{(s)} = G \eta^{(s)}.
+\]
+For any fixed offset $r$,
+\[
+\widehat c^{(s)}[r]
+  :=
+  \sum_j \gamma^{(s)}_j \eta^{(s)}_{j+r}
+\]
+is an unbiased estimator of $c[r]$, because
+\[
+\E[\gamma^{(s)}_j \eta^{(s)}_\ell]
+  =
+  \E[(G\eta^{(s)})_j \eta^{(s)}_\ell]
+  =
+  \sum_k G_{jk}\E[\eta^{(s)}_k \eta^{(s)}_\ell]
+  =
+  G_{j\ell}.
+\]
+Hence
+\[
+\E[\widehat c^{(s)}[r]]
+  =
+  \sum_j G_{j,j+r}
+  =
+  c[r].
+\]
+Averaging over $J$ probes gives
+\[
+\widehat c[r]
+  =
+  \frac{1}{J}\sum_{s=1}^J \widehat c^{(s)}[r].
+\]
+
+The computation of $\widehat c[r]$ is itself efficient. Reshape
+$\gamma^{(s)}$ and $\eta^{(s)}$ to $M \times \cdots \times M$ tensors. Then
+$\widehat c^{(s)}[r]$ is a cross-correlation, so all offsets are obtained by
+FFT:
+\[
+\widehat c^{(s)}
+  =
+  \mathcal F^{-1}\!\left(
+    \mathcal F(\gamma^{(s)}) \odot \overline{\mathcal F(\eta^{(s)})}
+  \right),
+\]
+zero-padded to shape $(2M-1,\ldots,2M-1)$.
+
+This gives the following approximation scheme for predictive variances:
+\begin{enumerate}
+    \item Draw $J$ probe vectors $\eta^{(s)}$.
+    \item Solve $A\beta^{(s)} = D\eta^{(s)}$ for each probe.
+    \item Form $\gamma^{(s)} = D\beta^{(s)}$ and estimate all $c[r]$ by FFT
+    cross-correlations.
+    \item Evaluate $\sigma_*^2 \approx \sum_r e^{2\pi i h \langle x_*, r \rangle}\widehat c[r]$
+    at all test points by one Type-2 NUFFT.
+\end{enumerate}
+The dominant cost is now the $J$ probe solves, rather than one solve per test
+block. For large test sets this is much cheaper, since $J$ is chosen
+independently of the number of test points.
+\section{Predictive Class Probability }
 Finally, the predictive class probability is
 \[
 p(y_* = 1|y)
@@ -658,44 +900,367 @@ p(y_* = 1|y)
 
 \section{Summary}
 We can learn hyperparameters, compute predictive means in $\calO(n + M\log M)$, but the cost of applying $K^{-1} + \Delta$ will give a larger constant than in the conjugate case, since we must rely on NUFFT in conjugate gradient solves, rather than the Toeplitz operation. \\
-\section{Thoughts moving forward}
+\section{Negative Binomial}
+We can use the same PolyGamma augmentation for negative binomial observations. The key point is that the Fourier / NUFFT linear algebra is unchanged; only the likelihood-dependent scalars in the $E$-step change, and if we choose to learn the shape parameter $r$, that is an additional scalar update in the $M$-step.
+
+\subsection{Likelihood and augmentation}
+Let
+\[
+y_i \mid f_i, r
+  \sim \mathrm{NB}(r,\sigma(f_i)),
+\]
+with pmf
+\[
+p(y_i\mid f_i,r)
+  =
+  \binom{y_i+r-1}{y_i}\,
+  \sigma(f_i)^{y_i}\,
+  \bigl(1-\sigma(f_i)\bigr)^r.
+\]
+Using
+\[
+\sigma(f)=\frac{e^f}{1+e^f},
+\qquad
+1-\sigma(f)=\frac{1}{1+e^f},
+\]
+the $f_i$-dependent part is
+\[
+p(y_i\mid f_i,r)
+  \propto
+  \frac{e^{y_i f_i}}{(1+e^{f_i})^{y_i+r}}.
+\]
+Apply the PolyGamma identity with
+\[
+a=y_i,
+\qquad
+b=y_i+r,
+\qquad
+\kappa_i := a-\frac{b}{2} = \frac{y_i-r}{2}.
+\]
+Then
+\[
+\frac{e^{y_i f_i}}{(1+e^{f_i})^{y_i+r}}
+  =
+  2^{-(y_i+r)}
+  e^{\kappa_i f_i}
+  \int_0^\infty
+    \exp\!\Bigl(-\frac{1}{2}\omega_i f_i^2\Bigr)\,
+    PG(\omega_i\mid y_i+r,0)\,d\omega_i.
+\]
+Hence the augmented joint is
+\[
+p(f,y,\omega\mid r,\theta)
+  =
+  p(f\mid\theta)
+  \prod_{i=1}^n
+  \binom{y_i+r-1}{y_i}\,
+  2^{-(y_i+r)}\,
+  e^{\kappa_i f_i}\,
+  e^{-\frac{1}{2}\omega_i f_i^2}\,
+  PG(\omega_i\mid y_i+r,0).
+\]
+
+\subsection{Mean-field updates}
+Use the same variational family
+\[
+q(f,\omega)=q(f)\prod_{i=1}^n q(\omega_i).
+\]
+Conditioning on $q(\omega)$ gives
+\[
+\log q^*(f)
+  =
+  -\frac{1}{2}f^T K_\theta^{-1} f
+  + \kappa^T f
+  - \frac{1}{2}f^T \Lambda f
+  + \mathrm{const},
+\]
+where
+\[
+\kappa
+  :=
+  \left(\frac{y_1-r}{2},\ldots,\frac{y_n-r}{2}\right)^T,
+\qquad
+\Lambda
+  :=
+  \diag\!\bigl(\E_q[\omega_i]\bigr).
+\]
+Therefore
+\[
+q(f)=N(\mu,\Sigma),
+\qquad
+\Sigma=(K_\theta^{-1}+\Lambda)^{-1},
+\qquad
+\mu=\Sigma\kappa.
+\]
+Fixing $q(f)$ and using the same tilting identity as in the Bernoulli case,
+\[
+q^*(\omega_i)=PG(y_i+r,c_i),
+\]
+where
+\[
+c_i
+  :=
+  \sqrt{\E_q[f_i^2]}
+  =
+  \sqrt{\mu_i^2 + \Sigma_{ii}}.
+\]
+Its mean is
+\[
+\E_q[\omega_i]
+  =
+  \frac{y_i+r}{2c_i}\tanh\!\Bigl(\frac{c_i}{2}\Bigr).
+\]
+Thus the only changes relative to Bernoulli are
+\[
+\kappa_i = \frac{y_i-r}{2},
+\qquad
+b_i = y_i+r,
+\qquad
+\Lambda_{ii}
+  =
+  \frac{y_i+r}{2c_i}\tanh\!\Bigl(\frac{c_i}{2}\Bigr).
+\]
+All of the Fourier-feature machinery from the Bernoulli model is unchanged:
 \begin{enumerate}
-    \item Avoiding $\Sigma v$ matvec where $\Sigma\in \R^{n\times n}$
-    \item Maybe try with sparse inducing points instead of $m=n$ so that $\Sigma\in \R^{m\times m}$
-    \begin{itemize}
-        \item Ie exactly Wenzel's procedure, just with truncated features.
-    \end{itemize}
+  \item $\Sigma z = (K^{-1}+\Lambda)^{-1} z$ is still applied with the same $M\times M$ Hermitian solve,
+  \item $\diag(\Sigma)$ is still estimated by Hutchinson probes,
+  \item the Toeplitz warm start still uses the approximation $\Lambda \approx \bar{\lambda} I$.
 \end{enumerate}
 
-\section{Results}
-\begin{figure}
-    \centering
-    \includegraphics[width=0.75\linewidth]{bias_gradient.png}
-    \caption{Biased Gradients?}
-    \label{fig:grad-bias}
-\end{figure}
-\begin{figure}
-    \centering
-    \includegraphics[width=0.75\linewidth]{PG_vanillacomparison.png}
-    \caption{Un-biased Gradients?}
-    \label{fig:grad-bias}
-\end{figure}
-\begin{figure}
-    \centering
-    \includegraphics[width=0.75\linewidth]{PG_convergence.png}
-    \caption{Convergence}
-    \label{fig:grad-bias}
-\end{figure}
+\subsection{Kernel hyperparameter update}
+For fixed $q(f)$, the kernel hyperparameter gradient is exactly the same as in the Bernoulli case, because only the prior term depends on $\theta$:
+\[
+\frac{\partial}{\partial \theta}\mathcal L
+  =
+  \frac{\partial}{\partial \theta}
+  \E_q[\log p(f\mid \theta)].
+\]
+Therefore the revised $M$-step formula from the previous section applies without modification:
+\[
+\frac{\partial}{\partial \theta}\mathcal L
+  =
+  \frac{1}{2}\mu^T K^{-1}(\partial_\theta K)K^{-1}\mu
+  -
+  \frac{1}{2}
+  \Tr\!\bigl((I+\Lambda K)^{-1}\Lambda\,\partial_\theta K\bigr).
+\]
+So the same Term 1 / trace-estimation machinery, NUFFTs, and warm-started CG are reused.
 
+\subsection{Updating the shape parameter $r$}
+Now suppose $r$ is also learned. For fixed $q(f)$, the only part of the ELBO that depends on $r$ is the expected log-likelihood:
+\[
+\mathcal L(r)
+  =
+  \sum_{i=1}^n
+  \E_{q(f_i)}\bigl[\log p(y_i\mid f_i,r)\bigr]
+  + \mathrm{const}.
+\]
+Using
+\[
+\log p(y_i\mid f_i,r)
+  =
+  \log\Gamma(y_i+r)
+  - \log\Gamma(r)
+  - \log(y_i!)
+  + y_i f_i
+  - (y_i+r)\log(1+e^{f_i}),
+\]
+we differentiate with respect to $r$ while holding $q(f)$ fixed:
+\[
+\frac{\partial \mathcal L}{\partial r}
+  =
+  \sum_{i=1}^n
+  \left[
+    \psi(y_i+r)-\psi(r)
+    -
+    \E_{q(f_i)}\log(1+e^{f_i})
+  \right].
+\]
+Since
+\[
+\log \sigma(-f) = -\log(1+e^f),
+\]
+this is equivalently
+\[
+\boxed{
+\frac{\partial \mathcal L}{\partial r}
+  =
+  \sum_{i=1}^n
+  \left[
+    \psi(y_i+r)-\psi(r)
+    +
+    \E_{q(f_i)}\log \sigma(-f_i)
+  \right].
+}
+\]
+Under the Gaussian variational approximation
+\[
+q(f_i)=N(\mu_i,\Sigma_{ii}),
+\]
+the remaining expectation is a one-dimensional Gaussian integral:
+\[
+\E_{q(f_i)}\log \sigma(-f_i)
+  =
+  \int
+    \log \sigma(-f)\,
+    N(f\mid \mu_i,\Sigma_{ii})\,df.
+\]
+Writing $f=\mu_i+\sqrt{\Sigma_{ii}}\,t$ with $t\sim N(0,1)$ gives
+\[
+\E_{q(f_i)}\log \sigma(-f_i)
+  =
+  \int
+    \log \sigma\!\bigl(-(\mu_i+\sqrt{\Sigma_{ii}}\,t)\bigr)\,
+    N(t\mid 0,1)\,dt,
+\]
+which is evaluated numerically by Gauss--Hermite quadrature. Let $\{x_k,w_k\}_{k=1}^K$ be the standard Gauss--Hermite nodes and weights for the weight $e^{-x^2}$, so that
+\[
+\int_{-\infty}^{\infty} h(x)e^{-x^2}\,dx
+  \approx
+  \sum_{k=1}^K w_k h(x_k).
+\]
+Since
+\[
+\int g(t)\,N(t\mid 0,1)\,dt
+  =
+  \frac{1}{\sqrt{\pi}}
+  \int
+    g(\sqrt{2}\,x)e^{-x^2}\,dx,
+\]
+we obtain
+\[
+\E_{q(f_i)}\log \sigma(-f_i)
+  \approx
+  \frac{1}{\sqrt{\pi}}
+  \sum_{k=1}^K
+    w_k\,
+    \log \sigma\!\Bigl(-\bigl(\mu_i+\sqrt{2\Sigma_{ii}}\,x_k\bigr)\Bigr).
+\]
+Equivalently, define normalized nodes and weights
+\[
+\tilde t_k := \sqrt{2}\,x_k,
+\qquad
+\tilde w_k := \frac{w_k}{\sqrt{\pi}},
+\]
+so that
+\[
+\boxed{
+\E_{q(f_i)}\log \sigma(-f_i)
+  \approx
+  \sum_{k=1}^K
+    \tilde w_k\,
+    \log \sigma\!\Bigl(-\bigl(\mu_i+\sqrt{\Sigma_{ii}}\,\tilde t_k\bigr)\Bigr).
+}
+\]
+Thus for each $i$ the actual computation is:
+\begin{enumerate}
+  \item form $\sigma_i := \sqrt{\Sigma_{ii}}$,
+  \item evaluate the $K$ shifted points
+  \[
+  f_{ik} := \mu_i + \sigma_i \tilde t_k,
+  \]
+  \item compute
+  \[
+  \ell_{ik} := \log \sigma(-f_{ik}),
+  \]
+  \item take the weighted sum
+  \[
+  \sum_{k=1}^K \tilde w_k \ell_{ik}.
+  \]
+\end{enumerate}
+Vectorizing over all $i\in[n]$, this is just one broadcasted evaluation of an $n\times K$ array
+\[
+f_{ik} = \mu_i + \sqrt{\Sigma_{ii}}\,\tilde t_k,
+\]
+followed by an $n\times K$ application of $\log \sigma(-\cdot)$ and a weighted reduction over $k$. The total cost is $\calO(nK)$ for fixed $K$, with no NUFFT, Toeplitz, or CG solve once $\mu_i$ and $\Sigma_{ii}$ are already available from the $E$-step.
+Equivalently, if we stack these terms into a matrix
+\[
+F
+  :=
+  \begin{bmatrix}
+    f_{11} & \cdots & f_{1K}\\
+    \vdots & \ddots & \vdots\\
+    f_{n1} & \cdots & f_{nK}
+  \end{bmatrix}
+  \in \R^{n\times K},
+\]
+then the quadrature contribution to the $r$-gradient is
+\[
+g_i
+  :=
+  \sum_{k=1}^K \tilde w_k \log \sigma(-f_{ik}),
+\qquad
+g=(g_1,\ldots,g_n)^T\in\R^n.
+\]
+So the work is:
+\begin{enumerate}
+  \item form the $n\times K$ matrix $F$ : $\calO(nK)$,
+  \item apply $\log \sigma(-\cdot)$ entrywise to $F$ : $\calO(nK)$,
+  \item multiply by the $K$ weights and sum across columns : $\calO(nK)$.
+\end{enumerate}
+Hence the whole quadrature step is linear in the number of observations $n$, up to the fixed quadrature size $K$.
 
-For $d=1$, fine and stable. 
+To enforce positivity, we optimize
+\[
+\eta := \log r.
+\]
+By the chain rule,
+\[
+\frac{\partial \mathcal L}{\partial \eta}
+  =
+  \frac{\partial \mathcal L}{\partial r}
+  \frac{\partial r}{\partial \eta}
+  =
+  r\,
+  \frac{\partial \mathcal L}{\partial r}.
+\]
+Hence a gradient-ascent update takes the form
+\[
+\eta^{(t+1)}
+  =
+  \eta^{(t)}
+  +
+  \rho_r\,
+  r^{(t)}
+  \sum_{i=1}^n
+  \left[
+    \psi(y_i+r^{(t)})-\psi(r^{(t)})
+    +
+    \E_{q(f_i)}\log \sigma(-f_i)
+  \right].
+\]
+After updating $r$, the next $E$-step uses the refreshed quantities
+\[
+\kappa_i = \frac{y_i-r}{2},
+\qquad
+b_i = y_i+r,
+\qquad
+\Lambda_{ii}
+  =
+  \frac{y_i+r}{2c_i}\tanh\!\Bigl(\frac{c_i}{2}\Bigr).
+\]
+So learning $r$ changes the next diagonal system through $\kappa$ and $\Lambda$, but the expensive linear algebra is exactly the same as before.
 
-Operators and numerical instability:
-\begin{itemize}
-\item Seems like solving $DF^*F D \alpha= DF^*z$ for $\alpha$ is better in large length scale regime, 
-\item But solving 
-$F^*F \beta = F^* v$ for $\beta$ then $\alpha = D^{-2} \beta$ is better in small length scale. 
-\end{itemize}
+\subsection{Predictive mean count}
+In this parameterization,
+\[
+\E[y_i\mid f_i,r] = r e^{f_i}.
+\]
+Therefore, under the Gaussian approximation
+\[
+f_* \mid y \approx N(\mu_*,\sigma_*^2),
+\]
+the predictive mean count is
+\[
+\E[y_*\mid y]
+  \approx
+  r\,\E[e^{f_*}]
+  =
+  \boxed{
+  r\exp\!\left(\mu_*+\frac{1}{2}\sigma_*^2\right).
+  }
+\]
+Thus prediction reuses the same latent predictive mean $\mu_*$ and variance $\sigma_*^2$ derived above; only the final response map differs from the Bernoulli case.
 
 
 \end{document}

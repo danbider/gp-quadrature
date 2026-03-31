@@ -1,5 +1,5 @@
 # Fdb version 4
-["pdflatex"] 1774896087.86896 "main.tex" "main.pdf" "main" 1774896089.30115 2
+["pdflatex"] 1774913483.73242 "main.tex" "main.pdf" "main" 1774913484.81338 2
   "/usr/local/texlive/2024/texmf-dist/fonts/map/fontname/texfonts.map" 1577235249 3524 cb3e574dea2d1052e39280babc910dc8 ""
   "/usr/local/texlive/2024/texmf-dist/fonts/tfm/public/latex-fonts/lasy6.tfm" 1136768653 520 4889cce2180234b97cad636b6039c722 ""
   "/usr/local/texlive/2024/texmf-dist/fonts/tfm/public/libertine/LinLibertineT-tlf-t1.tfm" 1490131464 19504 bdf9fb416f5a91bf56b1ccda887f5b91 ""
@@ -172,8 +172,8 @@
   "/usr/local/texlive/2024/texmf-var/web2c/pdftex/pdflatex.fmt" 1727036411 8221425 4b6521c9f2f7fa9c3ab19570eb0c31e5 ""
   "/usr/local/texlive/2024/texmf.cnf" 1710266656 577 e590dabc9e28c5b61546e15f63eebcdf ""
   "hw.sty" 1774829850 13989 edd9806ac17910d74bf12b76e3a45f2f ""
-  "main.aux" 1774809399.50645 32 3985256e7290058c681f74d7a3565a19 "pdflatex"
-  "main.tex" 1774896082.44975 19036 25f06d76f4d31c0e8674b7d7867b2e30 ""
+  "main.aux" 1774908072.07684 3792 d9e5d5f81a0932dbc799a35db8fae1b7 "pdflatex"
+  "main.tex" 1774913174.96367 32142 82d037eec344246d624b8f9e086d7c67 ""
   (generated)
   "main.aux"
   "main.log"
