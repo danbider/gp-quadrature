@@ -1,0 +1,11 @@
+{
+  "negative_control_loglog_slope": -1.106899829244742,
+  "negative_control_loglog_intercept": 2.7072756871686665,
+  "negative_control_loglog_r2": 0.9758582752235515,
+  "domains": [
+    "Surrounding tumor",
+    "Invasive",
+    "Healthy",
+    "Tumor"
+  ]
+}

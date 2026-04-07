@@ -1,0 +1,5 @@
+[0] Config.pm:307> INFO - This is Biber 2.19
+[0] Config.pm:310> INFO - Logfile is '/Users/colecitrenbaum/Documents/GPs/gp-quadrature/polyagamma_classification/tex writeup/.texpadtmp/main.blg'
+[27] biber-darwin:340> INFO - === Sat Apr  4, 2026, 11:05:05
+[33] Utils.pm:410> ERROR - /Users/colecitrenbaum/Documents/GPs/gp-quadrature/polyagamma_classification/tex writeup/.texpadtmp/main.bcf is malformed, last biblatex run probably failed. Deleted /Users/colecitrenbaum/Documents/GPs/gp-quadrature/polyagamma_classification/tex writeup/.texpadtmp/main.bbl
+[33] Biber.pm:136> INFO - ERRORS: 1

@@ -1263,4 +1263,247 @@ the predictive mean count is
 Thus prediction reuses the same latent predictive mean $\mu_*$ and variance $\sigma_*^2$ derived above; only the final response map differs from the Bernoulli case.
 
 
+\section{Hierarchical Additive Kernel Model}
+
+We extend the single-kernel model to a hierarchical setting where observations come from $L$ locations indexed by $\ell_i\in\{1,\dots,L\}$. The latent function decomposes as
+\[
+f_i = g(t_i) + h_{\ell_i}(t_i),
+\]
+where $g\sim GP(0,k_g)$ is a shared (global) process and $h_\ell\stackrel{\mathrm{ind}}{\sim}GP(0,k_h)$ are independent location-specific processes. The observation model is unchanged:
+\[
+y_i\mid f_i,r \sim \mathrm{NB}(r,\sigma(f_i)).
+\]
+After marginalizing, the prior on $f=(f_1,\dots,f_n)^T$ is Gaussian with covariance
+\[
+K = K_g + K_h,
+\]
+where $(K_g)_{ij}=k_g(t_i,t_j)$ and $(K_h)_{ij}=\mathbf{1}[\ell_i=\ell_j]\,k_h(t_i,t_j)$.
+
+The PG variational updates from the single-kernel case carry over with the replacement $K_\theta\leadsto K_g+K_h$: the E-step is
+\[
+\Sigma=(K^{-1}+\Lambda)^{-1},\qquad \mu=\Sigma\kappa,
+\]
+and the $\omega$-, $c$-, $\Lambda$-, $\kappa$-, and $r$-updates are structurally identical. The challenge is implementing the linear algebra efficiently. We show below that the feature-space reduction survives in block form, and that every block matvec is a Toeplitz-style operation.
+
+\subsection{Feature-space factorizations}
+
+Both kernels admit equispaced Fourier feature representations. For the global kernel,
+\[
+K_g = \Phi_g\Phi_g^*,\qquad \Phi_g = F_g D_g \in \mathbb{C}^{n\times m_g},
+\]
+where $F_g$ is the NUFFT feature matrix at all $n$ observation times and $D_g=\diag(\sqrt{h^d\hat{k}_g(\xi_j)})$ are the spectral weights. This uses the same \texttt{\_build\_spectral\_state} construction as the single-kernel model.
+
+For the local kernel, ordering observations by location gives a block-diagonal structure:
+\[
+K_h = \operatorname{blockdiag}(K_h^{(1)},\dots,K_h^{(L)}),\qquad K_h^{(\ell)}=\Phi_\ell\Phi_\ell^*,\qquad \Phi_\ell = F_\ell D_h\in\mathbb{C}^{n_\ell\times m_h},
+\]
+where $F_\ell$ is the NUFFT feature matrix restricted to the $n_\ell$ times in location $\ell$, and $D_h=\diag(\sqrt{h^d\hat{k}_h(\xi_j)})$ is shared across locations (same kernel, same spectral grid). Define the full local feature matrix
+\[
+\Phi_{\mathrm{loc}} = \operatorname{blockdiag}(\Phi_1,\dots,\Phi_L)\in\mathbb{C}^{n\times Lm_h}.
+\]
+Then $K_h=\Phi_{\mathrm{loc}}\Phi_{\mathrm{loc}}^*$.
+
+\paragraph{Grid choice.}
+We use whichever spectral grid is more conservative (larger $m$, finer $h$) for both kernels. If the global and local kernels have different lengthscales, the grid that captures the shorter lengthscale subsumes the other. In practice this means calling \texttt{get\_xis} for both kernels and taking the grid with more points, then evaluating both spectral densities on that shared grid. This ensures $m_g=m_h=:m$ and the same frequency set $\{\xi_j\}$.
+
+\subsection{Stacked feature map and reduced system}
+
+Define the stacked feature map
+\[
+U = [\,\Phi_g\;\;\Phi_{\mathrm{loc}}\,]\in\mathbb{C}^{n\times(m+Lm)},
+\]
+so that $K=UU^*$. The feature-space reduction from Section~2 generalizes directly. Since $\operatorname{Range}(\Sigma z)\subseteq\operatorname{Range}(U)$, write $v=Ua$ and obtain
+\[
+\boxed{
+\Sigma z = U(I+U^*\Delta U)^{-1}U^*z.
+}
+\]
+This is the exact analogue of the single-kernel identity $\Sigma z = \Phi(I+\Phi^*\Delta\Phi)^{-1}\Phi^*z$, with $\Phi$ replaced by $U$.
+
+The reduced system has dimension $(1+L)m\times(1+L)m$ with block structure
+\[
+I + U^*\Delta U =
+\begin{bmatrix}
+I + \Phi_g^*\Delta\Phi_g & \Phi_g^*\Delta\Phi_{\mathrm{loc}}\\[4pt]
+\Phi_{\mathrm{loc}}^*\Delta\Phi_g & I + \Phi_{\mathrm{loc}}^*\Delta\Phi_{\mathrm{loc}}
+\end{bmatrix}.
+\]
+We now show that each block inherits Toeplitz structure, so CG matvecs remain fast.
+
+\subsection{Block structure and Toeplitz matvecs}
+
+Let $I_\ell$ denote the index set for location $\ell$ and $\Delta_\ell=\diag(\delta_i:i\in I_\ell)$. Define the per-location weighted Toeplitz operator
+\[
+T_\ell := F_\ell^*\Delta_\ell F_\ell\in\mathbb{C}^{m\times m}.
+\]
+Since the frequencies are equispaced, $(T_\ell)_{jk}=\sum_{i\in I_\ell}\delta_i\,e^{2\pi i x_i(\xi_k-\xi_j)}$ depends only on $\xi_k-\xi_j$, so $T_\ell$ is Toeplitz. This is the same structure as the single-kernel $F^*\Delta F$. Each $T_\ell$ is built by one Type-1 NUFFT on the points of location $\ell$ with weights $\Delta_\ell$, analogous to \texttt{\_build\_weighted\_toeplitz}.
+
+Also define the global weighted Toeplitz operator
+\[
+T_{\mathrm{all}} := F_g^*\Delta F_g = \sum_{\ell=1}^L F_\ell^*\Delta_\ell F_\ell = \sum_{\ell=1}^L T_\ell.
+\]
+This is a single Toeplitz operator built from all $n$ points, as in the existing code.
+
+Now the four block types are:
+
+\paragraph{Global--global block.}
+\[
+I + \Phi_g^*\Delta\Phi_g = I + D_g\,T_{\mathrm{all}}\,D_g.
+\]
+Same structure as the single-kernel E-step operator. One Toeplitz matvec.
+
+\paragraph{Local--local block.}
+\[
+\Phi_{\mathrm{loc}}^*\Delta\Phi_{\mathrm{loc}} = \operatorname{blockdiag}(D_h T_1 D_h,\;\dots,\;D_h T_L D_h).
+\]
+Block diagonal: $L$ independent Toeplitz matvecs, one per location. Parallelizable.
+
+\paragraph{Global--local cross block.}
+\[
+\Phi_g^*\Delta\Phi_{\mathrm{loc}} = \bigl[\,D_g T_1 D_h\;\;\cdots\;\;D_g T_L D_h\,\bigr].
+\]
+Each sub-block $C_\ell = D_g\,T_\ell\,D_h$ is a Toeplitz matvec sandwiched between diagonal spectral weights.
+
+\paragraph{Local--global cross block.}
+\[
+\Phi_{\mathrm{loc}}^*\Delta\Phi_g = \begin{bmatrix}D_h T_1 D_g\\\vdots\\D_h T_L D_g\end{bmatrix} = (\Phi_g^*\Delta\Phi_{\mathrm{loc}})^*.
+\]
+
+\subsection{CG matvec: applying $I+U^*\Delta U$ to a vector}
+
+Partition the reduced-space vector as $a=(a_g,a_1,\dots,a_L)^T$ with $a_g\in\mathbb{C}^m$ and each $a_\ell\in\mathbb{C}^m$. One matvec with the block operator produces:
+
+\paragraph{Global output:}
+\[
+\boxed{
+\bigl(I+U^*\Delta U\bigr)_g\,a
+= a_g + D_g\,T_{\mathrm{all}}\,(D_g a_g) + \sum_{\ell=1}^L D_g\,T_\ell\,(D_h a_\ell).
+}
+\]
+
+\paragraph{Local output for location $\ell$:}
+\[
+\boxed{
+\bigl(I+U^*\Delta U\bigr)_\ell\,a
+= a_\ell + D_h\,T_\ell\,(D_h a_\ell) + D_h\,T_\ell\,(D_g a_g).
+}
+\]
+
+\paragraph{Efficient evaluation.}
+Observe that location $\ell$ contributes $T_\ell$ applied to two vectors: $D_g a_g$ and $D_h a_\ell$. Since $T_\ell$ is linear, we can combine these into one Toeplitz apply per location:
+\[
+T_\ell\bigl(D_g a_g + D_h a_\ell\bigr) = T_\ell(D_g a_g) + T_\ell(D_h a_\ell).
+\]
+Alternatively, batch the two right-hand sides and apply $T_\ell$ once with a $2$-column RHS. Either way, each CG iteration costs:
+\begin{enumerate}
+\item One global Toeplitz apply: $T_{\mathrm{all}}(D_g a_g)$.
+\item $L$ local Toeplitz applies: $T_\ell(D_g a_g + D_h a_\ell)$ for each $\ell$.
+\item Diagonal scaling and accumulation.
+\end{enumerate}
+Each Toeplitz apply is $\mathcal{O}(m\log m)$ via FFT (on-grid) or $\mathcal{O}(m\log m + n_\ell\log(1/\varepsilon))$ via NUFFT (off-grid), so the total matvec cost is
+\[
+\mathcal{O}\bigl(m\log m + L\cdot m\log m\bigr) = \mathcal{O}\bigl((1+L)\,m\log m\bigr).
+\]
+
+\paragraph{Building the per-location Toeplitz operators.}
+Each $T_\ell$ has a convolution vector of length $2m-1$ built from a Type-1 NUFFT on the subset $\{x_i:i\in I_\ell\}$ with weights $\{\delta_i:i\in I_\ell\}$. These are computed once per E-step iteration and reused across all CG iterations. In code, this generalizes \texttt{\_build\_weighted\_toeplitz} to return $L+1$ \texttt{ToeplitzND} objects: one global and $L$ local.
+
+\subsection{Reconstruction: from feature space back to observation space}
+
+After solving $(I+U^*\Delta U)\,a = U^*z$ for $a=(a_g,a_1,\dots,a_L)^T$, the observation-space result is
+\[
+\Sigma z = U a = \Phi_g a_g + \Phi_{\mathrm{loc}}\begin{bmatrix}a_1\\\vdots\\a_L\end{bmatrix}.
+\]
+In code:
+\begin{enumerate}
+\item Global contribution: $F_g(D_g a_g)$ via one Type-2 NUFFT on all $n$ points.
+\item Local contributions: for each $\ell$, $F_\ell(D_h a_\ell)$ via one Type-2 NUFFT on the $n_\ell$ points of location $\ell$, then scatter into the length-$n$ output at indices $I_\ell$.
+\end{enumerate}
+
+\subsection{Right-hand side: computing $U^*z$}
+
+The RHS of the reduced system is
+\[
+U^*z = \begin{bmatrix}\Phi_g^*z\\\Phi_1^*z_1\\\vdots\\\Phi_L^*z_L\end{bmatrix}
+= \begin{bmatrix}D_g F_g^*z\\D_h F_1^*z_1\\\vdots\\D_h F_L^*z_L\end{bmatrix},
+\]
+where $z_\ell=(z_i)_{i\in I_\ell}$. This requires one global Type-1 NUFFT and $L$ local Type-1 NUFFTs.
+
+\subsection{Hermitian symmetrization}
+
+As in the single-kernel case, define the half-weight $D_g^{1/2}=\diag(\sqrt{|D_g|_{jj}})$ and analogously $D_h^{1/2}$, and substitute $a_g = D_g^{-1/2}\tilde a_g$, $a_\ell = D_h^{-1/2}\tilde a_\ell$ to symmetrize the system. The resulting operator is Hermitian positive definite, so CG converges monotonically. Each block becomes:
+\begin{align*}
+&\text{global--global:}\quad I + D_g^{1/2}\,T_{\mathrm{all}}\,D_g^{1/2},\\
+&\text{local--local $\ell$:}\quad I + D_h^{1/2}\,T_\ell\,D_h^{1/2},\\
+&\text{cross $\ell$:}\quad D_g^{1/2}\,T_\ell\,D_h^{1/2}.
+\end{align*}
+This is the form used in the actual CG solve, analogous to the existing whitened system $I + D^{1/2}F^*\Delta FD^{1/2}$.
+
+\subsection{Block-diagonal preconditioner}
+
+Since each weighted Toeplitz operator $T_\ell$ can be applied exactly in $\mathcal{O}(m\log m)$ (build the convolution vector via one Type-1 NUFFT, then apply via FFT-based circular convolution), the diagonal blocks of $I+U^*\Delta U$ are already cheap. The only coupling that makes the full system harder than $1+L$ independent solves is the off-diagonal cross blocks. A natural preconditioner drops these:
+\[
+P = \begin{bmatrix}
+I + D_g^{1/2}\,T_{\mathrm{all}}\,D_g^{1/2} & 0\\
+0 & \operatorname{blockdiag}(I + D_h^{1/2}\,T_\ell\,D_h^{1/2})_{\ell=1}^L
+\end{bmatrix}.
+\]
+Applying $P^{-1}$ decomposes into $1+L$ independent CG solves, each involving only exact Toeplitz matvecs---no scalar-$\Delta$ approximation or inner NUFFT solves needed. Each diagonal block is a small $m\times m$ Toeplitz-plus-identity system, so these inner solves converge quickly.
+
+\subsection{Kernel hyperparameter gradients}
+
+The gradient formula from the Revised M Step generalizes by splitting $\partial_\theta K$ according to which kernel the parameter belongs to. For a global parameter $\theta_g$:
+\[
+\frac{\partial\mathcal{L}}{\partial\theta_g}
+= \frac{1}{2}\mu^T K^{-1}(\partial_{\theta_g}K_g)K^{-1}\mu
+- \frac{1}{2}\Tr\bigl((I+\Lambda K)^{-1}\Lambda\,\partial_{\theta_g}K_g\bigr).
+\]
+For a local parameter $\theta_h$:
+\[
+\frac{\partial\mathcal{L}}{\partial\theta_h}
+= \frac{1}{2}\mu^T K^{-1}(\partial_{\theta_h}K_h)K^{-1}\mu
+- \frac{1}{2}\Tr\bigl((I+\Lambda K)^{-1}\Lambda\,\partial_{\theta_h}K_h\bigr).
+\]
+In the feature representation, $\partial_{\theta_g}K_g = F_g D_g'{}^2 F_g^*$ and $\partial_{\theta_h}K_h = \Phi_{\mathrm{loc}}'\Phi_{\mathrm{loc}}'^*$ where the primes denote spectral-weight derivatives. So Term~1 and the trace estimation in \texttt{\_compute\_mstep\_gradient} use the same stochastic probe machinery, but with the derivative diagonal acting on the appropriate block of the feature-space solution.
+
+\subsection{Posterior decomposition}
+
+After convergence, the posterior mean $\mu$ can be decomposed into global and local contributions:
+\[
+\mu_g = K_g K^{-1}\mu,\qquad \mu_{h,\ell} = K_h^{(\ell)}(K^{-1}\mu)_{I_\ell}.
+\]
+In feature space, $K^{-1}\mu = \kappa - \Delta\mu$ (from the optimality condition), so
+\[
+\mu_g = \Phi_g\Phi_g^*(\kappa-\Delta\mu),\qquad
+\mu_{h,\ell} = \Phi_\ell\Phi_\ell^*(\kappa-\Delta\mu)_{I_\ell}.
+\]
+These are free once $\mu$ and $\Delta$ are known: just NUFFT forward--adjoint applications, no additional solves.
+
+\subsection{Predictive mean and variance}
+
+For a new test point $x_*$, let $\psi_{*,g}=D_g\varphi_*$ and $\psi_{*,\ell}=D_h\varphi_*$ be the global and local feature vectors. If the test point belongs to location $\ell_*$, the stacked test feature vector is
+\[
+u_* = \begin{bmatrix}\psi_{*,g}\\0\\\vdots\\\psi_{*,\ell_*}\\\vdots\\0\end{bmatrix}\in\mathbb{C}^{(1+L)m},
+\]
+with $\psi_{*,\ell_*}$ in the $\ell_*$-th local block and zeros elsewhere. Then
+\[
+\mu_* = u_*^* \,a_\mu,\qquad \sigma_*^2 = u_*^*(I+U^*\Delta U)^{-1}u_*,
+\]
+where $a_\mu=(I+U^*\Delta U)^{-1}U^*\kappa$ is the feature-space mean coefficient. The predictive variance requires solving the same reduced system against $u_*$.
+
+For stochastic predictive variance via diagonal sums, the same Rademacher probe + cross-correlation scheme from Section~7 applies, but with the probe vectors now living in $(1+L)m$-dimensional feature space. Each probe solve uses the block CG matvec described above.
+
+\subsection{Summary of computational changes}
+
+Relative to the single-kernel model, the hierarchical extension requires:
+\begin{enumerate}
+\item Two \texttt{\_SpectralState} objects: one for $k_g$ (global, all $n$ points) and one for $k_h$ (template for local, applied per-location).
+\item Per-location index arrays $I_1,\dots,I_L$ to partition observations.
+\item $L+1$ weighted Toeplitz operators per E-step: $T_{\mathrm{all}}$ and $T_1,\dots,T_L$.
+\item A block CG matvec that applies $(I+U^*\Delta U)$ using the formula above: $1$ global + $L$ local Toeplitz applies per iteration.
+\item Feature-space vectors of dimension $(1+L)m$ instead of $m$.
+\end{enumerate}
+The single-kernel code paths (\texttt{\_make\_feature\_space\_solver}, \texttt{\_build\_weighted\_toeplitz}, \texttt{\_run\_estep}) remain the building blocks; the hierarchical model composes them into the block structure.
+
+
 \end{document}

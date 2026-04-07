@@ -13,3 +13,4 @@ efgp1d.py
 efgp3d.py
 *.h5ad
 *.csv
+polyagamma_classification/GPcounts/*

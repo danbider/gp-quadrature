@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import sys
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -23,7 +24,7 @@ if str(_ROOT) not in sys.path:
 
 from cg import ConjugateGradients
 from efgpnd import NUFFT, ToeplitzND, compute_convolution_vector_vectorized_dD
-from kernels import SquaredExponential
+from kernels import Kernel, Matern, SquaredExponential
 from utils.kernels import get_xis
 
 @dataclass
@@ -296,20 +297,32 @@ def _make_kernel(
     dimension: int,
     lengthscale: float,
     variance: float,
-) -> SquaredExponential:
+    nu: float = 1.5,
+) -> Kernel:
     kernel_name = kernel.lower()
-    if kernel_name not in {"squared_exponential", "se", "rbf"}:
-        raise ValueError("Only the squared exponential kernel is supported in v1.")
-    return SquaredExponential(
-        dimension=dimension,
-        init_lengthscale=lengthscale,
-        init_variance=variance,
-    )
+    if kernel_name in {"squared_exponential", "se", "rbf"}:
+        return SquaredExponential(
+            dimension=dimension,
+            init_lengthscale=lengthscale,
+            init_variance=variance,
+        )
+    elif kernel_name in {"matern", "matérn"}:
+        return Matern(
+            dimension=dimension,
+            init_lengthscale=lengthscale,
+            init_variance=variance,
+            nu=nu,
+        )
+    else:
+        raise ValueError(
+            f"Unknown kernel {kernel!r}. "
+            "Supported: 'squared_exponential', 'se', 'rbf', 'matern'."
+        )
 
 
 def _build_spectral_state(
     X: torch.Tensor,
-    kernel: SquaredExponential,
+    kernel: Kernel,
     *,
     spectral_eps: float,
     trunc_eps: float,
@@ -1066,6 +1079,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
         self,
         *,
         kernel: str = "squared_exponential",
+        kernel_nu: float = 1.5,
         lengthscale_init: float = 0.3,
         variance_init: float = 1.0,
         max_iter: int = 50,
@@ -1096,6 +1110,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
         store_history: bool = False,
     ):
         self.kernel = kernel
+        self.kernel_nu = kernel_nu
         self.lengthscale_init = lengthscale_init
         self.variance_init = variance_init
         self.max_iter = max_iter
@@ -1243,6 +1258,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
                 dimension=X.shape[1],
                 lengthscale=self.lengthscale_init,
                 variance=self.variance_init,
+                nu=self.kernel_nu,
             )
             delta = initial_delta.to(device=self._device_, dtype=self._rdtype_)
             self._variational_state_ = _VariationalState(delta=delta)
@@ -1282,6 +1298,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
 
         optimizer = Adam(self.kernel_._gp_params_ref.parameters(), lr=self.lr, maximize=True)
         history: list[dict[str, float]] = []
+        fit_started = time.perf_counter()
 
         for outer in range(self.max_iter):
             likelihood = self._make_likelihood()
@@ -1340,6 +1357,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
 
             record = {
                 "iter": float(outer),
+                "elapsed_sec": float(time.perf_counter() - fit_started),
                 "lengthscale": float(self.kernel_.lengthscale),
                 "variance": float(self.kernel_.variance),
                 "grad_lengthscale": float(grad[0].item()),
@@ -1419,6 +1437,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
         self.history_.append(
             {
                 "iter": float(self.max_iter),
+                "elapsed_sec": float(time.perf_counter() - fit_started),
                 "lengthscale": self.lengthscale_,
                 "variance": self.variance_,
                 "grad_lengthscale": float(self.m_step_gradient_[0]),
@@ -1526,6 +1545,7 @@ class PolyagammaGPNegativeBinomialRegressor(_BasePolyagammaGPEstimator, Regresso
         total_count_update_frequency: int = 5,
         total_count_quadrature_nodes: int = 12,
         kernel: str = "squared_exponential",
+        kernel_nu: float = 1.5,
         lengthscale_init: float = 0.3,
         variance_init: float = 1.0,
         max_iter: int = 50,
@@ -1557,6 +1577,7 @@ class PolyagammaGPNegativeBinomialRegressor(_BasePolyagammaGPEstimator, Regresso
     ):
         super().__init__(
             kernel=kernel,
+            kernel_nu=kernel_nu,
             lengthscale_init=lengthscale_init,
             variance_init=variance_init,
             max_iter=max_iter,

@@ -1,0 +1,47 @@
+{
+  "sample_id": "V1_Breast_Cancer_Block_A_Section_1",
+  "n_spots": 3798,
+  "n_genes_total": 36601,
+  "n_genes_screened": 3,
+  "resolved_genes": [
+    {
+      "requested_gene": "ERBB2",
+      "gene": "ERBB2",
+      "category": "custom"
+    },
+    {
+      "requested_gene": "GAPDH",
+      "gene": "GAPDH",
+      "category": "custom"
+    },
+    {
+      "requested_gene": "HLA-B",
+      "gene": "HLA-B",
+      "category": "custom"
+    }
+  ],
+  "missing_genes": [],
+  "observed_domains": [
+    "Invasive",
+    "In situ",
+    "Non-tumor"
+  ],
+  "annotation_notes": [
+    "Computed standard Scanpy Leiden clusters before applying the published SpaMetric map. Treat these domains as exploratory rather than pathologist-ground-truth.",
+    "Applied the published SpaMetric Leiden->domain map attributed there to Fu et al. pathologist annotation."
+  ],
+  "coord_mins": [
+    4176.0,
+    4046.0
+  ],
+  "coord_span": [
+    16137.0,
+    18071.0
+  ],
+  "reference_links": {
+    "scanpy_dataset_docs": "https://scanpy.readthedocs.io/en/latest/generated/scanpy.datasets.visium_sge.html",
+    "scanpy_release_notes_visium_sge": "https://scanpy.readthedocs.io/en/1.9.x/release-notes/1.7.0.html",
+    "spametric_breast_cancer_tutorial": "https://spametric.readthedocs.io/en/stable/tutorials/breast_cancer.html",
+    "tenx_breast_cancer_dataset": "https://www.10xgenomics.com/resources/datasets/human-breast-cancer-block-a-section-1-1-standard-1-1-0"
+  }
+}

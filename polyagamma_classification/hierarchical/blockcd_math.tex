@@ -1,0 +1,398 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb, bm}
+\usepackage{booktabs}
+\usepackage[margin=1in]{geometry}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\C}{\mathbb{C}}
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\diag}{\operatorname{diag}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\title{Solvers for Hierarchical PG--NB--GP:\\
+  From Joint CG to Direct Schur}
+\author{Scratchpad}
+\date{}
+
+\begin{document}
+\maketitle
+
+%% ================================================================
+\section{Setup}
+
+Hierarchical additive GP:
+\[
+  f_i = g(t_i) + h_{\ell_i}(t_i), \qquad
+  g \sim \mathcal{GP}(0, k_g), \quad
+  h_\ell \sim \mathcal{GP}(0, k_h), \quad \ell = 1,\dots,L.
+\]
+Negative binomial likelihood with P\'olya-Gamma augmentation gives the
+conditional:
+\[
+  p(f \mid \omega, y) \propto \exp\!\bigl(-\tfrac12 f^\top \Delta\, f
+  + \kappa^\top f\bigr)
+  \cdot \exp\!\bigl(-\tfrac12 f^\top K^{-1} f\bigr),
+\]
+where $\Delta = \diag(\omega_i)$, $\kappa_i = \tfrac12(y_i - r)$,
+and $K$ is the joint prior covariance of $f = g + h$.
+
+%% ================================================================
+\section{Feature-space representation}
+
+Using the spectral approximation with shared grid $\{\xi_k\}_{k=1}^m$:
+\[
+  g(t) = \sum_k w_{g,k}\, a_{g,k}\, e^{2\pi i \xi_k \cdot t},
+  \qquad
+  h_\ell(t) = \sum_k w_{h,k}\, a_{h,k}^{(\ell)}\, e^{2\pi i \xi_k \cdot t},
+\]
+where $w_{g,k} = S_g(\xi_k)^{1/2}$, $w_{h,k} = S_h(\xi_k)^{1/2}$
+are spectral amplitude weights.
+
+Define:
+\begin{itemize}
+\item $D_g = \diag(w_{g,k}^2)$, \; $D_h = \diag(w_{h,k}^2)$,
+  \; and their square roots.
+\item $F \in \C^{n \times m}$: the NUFFT matrix, $F_{ik} = e^{2\pi i \xi_k t_i}$.
+\item $F_\ell \in \C^{n_\ell \times m}$: restriction to site~$\ell$.
+\item $T_\ell = F_\ell^* \Delta_\ell F_\ell$ (Toeplitz via NUFFT),
+  \; $T_{\mathrm{all}} = \sum_\ell T_\ell$.
+\end{itemize}
+
+%% ================================================================
+\section{The joint feature-space system}
+
+The posterior precision in symmetrized feature space is the
+$(1+L)m \times (1+L)m$ block matrix:
+\[
+  M =
+  \begin{pmatrix}
+    A     & B_1   & \cdots & B_L \\
+    B_1^* & D_1^{(h)} &     &     \\
+    \vdots &      & \ddots &     \\
+    B_L^* &       &        & D_L^{(h)}
+  \end{pmatrix}
+\]
+where:
+\begin{align}
+  A &= I_m + D_g^{1/2}\, T_{\mathrm{all}}\, D_g^{1/2}
+     & &\text{($m \times m$, global)} \label{eq:A}\\
+  D_\ell^{(h)} &= I_m + D_h^{1/2}\, T_\ell\, D_h^{1/2}
+     & &\text{($m \times m$, per-site)} \label{eq:D_ell}\\
+  B_\ell &= D_g^{1/2}\, T_\ell\, D_h^{1/2}
+     & &\text{($m \times m$, cross-term)} \label{eq:B_ell}
+\end{align}
+
+The Schur complement for $g$:
+\begin{equation}\label{eq:schur}
+  S = A - \sum_{\ell=1}^L B_\ell\, (D_\ell^{(h)})^{-1}\, B_\ell^*
+  \qquad (m \times m).
+\end{equation}
+
+%% ================================================================
+\section{Overview of approaches}
+
+We describe four solver approaches, ordered by development.
+All share the same EM outer loop: an E-step that updates
+$\tilde a_g, \tilde a_h^{(\ell)}, \sigma_{\mathrm{diag}}$,
+and an M-step that updates kernel hyperparameters via
+$\partial\mathcal{L}/\partial\theta$.
+
+The key distinctions are:
+\begin{enumerate}
+\item How the E-step posterior mean is obtained (CG on $(1+L)m$
+  system, block CD, or Schur elimination).
+\item How $\sigma_{\mathrm{diag}}$ is estimated.
+\item How the M-step trace term
+  $\tr(M^{-1}\, \partial M/\partial\theta)$ is computed
+  (observation-space Hutchinson, feature-space Hutchinson, or exact).
+\end{enumerate}
+
+%% ================================================================
+\section{Approach A: Joint CG solver (baseline)}
+
+\paragraph{E-step.}
+Solve the full $(1{+}L)m$-dimensional system $M\,\tilde a = \text{rhs}$
+with conjugate gradients. Each CG iteration applies the block
+matvec via Toeplitz embeddings: $O((1{+}L)\,m\log m)$ per iteration.
+
+\paragraph{sigma\_diag.}
+Observation-space Hutchinson: for each probe $z \in \R^n$,
+solve $(K^{-1} + \Delta)^{-1} z$ via CG on the full system,
+transforming between observation and feature space at each CG step.
+Requires $2(1{+}L)$ NUFFTs per CG iteration.
+
+\paragraph{M-step.}
+Observation-space Hutchinson probes: for each probe,
+apply $\partial K/\partial\theta$ (Toeplitz matvec in feature space,
+then NUFFT back), and compute $v^\top (\partial K/\partial\theta) v$
+where $v = M^{-1} z$ from an additional CG solve.
+Requires $\sim 2(1{+}L)$ NUFFTs per probe per CG iteration.
+
+\paragraph{Cost per outer iteration.}
+Dominated by NUFFTs inside CG loops. Typical CG counts:
+$\sim$25,000--36,000 total CG iterations, each touching
+$O(n)$ NUFFTs.
+
+\paragraph{Benchmark.} 1331s total, 88.7s/iter (mosquito dataset,
+$n{=}24{,}513$, $L{=}94$, $m{\approx}25$).
+
+%% ================================================================
+\section{Approach B: Block coordinate descent + Schur M-step}
+
+\paragraph{Key idea.} Exploit the arrow structure of $M$:
+the $h$-blocks are decoupled given $g$. Alternate between
+updating $g$ (fixing all $h_\ell$) and updating each $h_\ell$
+(fixing $g$), each via CG on an $m{\times}m$ system.
+
+\paragraph{E-step.}
+Each CD sweep:
+\begin{itemize}
+\item \textbf{g-step}: solve $A\,\tilde a_g = D_g^{1/2} F^*
+  (\kappa - \Delta\,h_{\text{combined}})$ via CG.
+  Cost: 1 NUFFT (type~1) for RHS, CG iterations using Toeplitz
+  matvecs, 1 NUFFT (type~2) to recover $g$ in observation space.
+\item \textbf{h-step}: for each $\ell$, solve
+  $D_\ell^{(h)}\,\tilde a_h^{(\ell)} = D_h^{1/2} F_\ell^*
+  (\kappa_\ell - \Delta_\ell g_\ell)$ via CG.
+  Cost: $L$ NUFFTs (type~1) + $L$ NUFFTs (type~2).
+\end{itemize}
+Per sweep: $2(1{+}L)$ NUFFTs. With 5 sweeps: $10(1{+}L)$ NUFFTs.
+
+\paragraph{sigma\_diag.}
+Independent (uncoupled) Hutchinson: solve $g$ and each $h_\ell$
+component separately via CG, batching probes.
+Cost: $2(1{+}L)$ NUFFTs (amortized over probes).
+
+\paragraph{M-step.}
+Feature-space Schur: form $S$ from the Toeplitz blocks
+(materializing $T_\ell$ via $m$ basis-vector matvecs),
+then compute $\tr(S^{-1}\,\partial A/\partial\theta_g)$ and
+analogous $\theta_h$ terms using Hutchinson probes in
+$(1{+}L)m$-dimensional feature space. No observation-space
+NUFFTs needed.
+
+\paragraph{Cost per outer iteration.}
+E-step: $3 \times [10(1{+}L) + 2(1{+}L)] = 36(1{+}L) \approx 3420$
+NUFFTs. M-step: $\sim$4000 feature-space CG iterations (Toeplitz only).
+No M-step NUFFTs.
+
+\paragraph{Benchmark.} 649s total, 43.3s/iter.
+Speedup: \textbf{2.0$\times$} over joint.
+
+\paragraph{Limitation.} CD is an approximation: the $g$/$h$ blocks
+are not jointly optimal at any finite number of sweeps.
+Hyperparameters (especially $\sigma_g^2$) can drift relative to
+the joint solve, though predictions remain accurate.
+
+%% ================================================================
+\section{Approach C: Schur CG (fully iterative)}
+
+\paragraph{Key idea.} Eliminate $h$ analytically via the Schur
+complement~\eqref{eq:schur}, reducing the E-step to an $m{\times}m$
+CG solve for $\tilde a_g$. Then recover each $\tilde a_h^{(\ell)}$
+by backsubstitution. This is \emph{exact} (no CD approximation)
+and stays entirely in feature space after the initial NUFFT transform.
+
+\paragraph{E-step.}
+\begin{enumerate}
+\item Transform $\kappa$ to feature space:
+  $\hat\kappa_g = D_g^{1/2} F^* \kappa$, \;
+  $\hat\kappa_{h,\ell} = D_h^{1/2} F_\ell^* \kappa_\ell$.
+  Cost: $1{+}L$ NUFFTs (type~1).
+\item Compute effective RHS:
+  $b_g^{\text{eff}} = \hat\kappa_g
+    - \sum_\ell B_\ell\,(D_\ell^{(h)})^{-1}\,\hat\kappa_{h,\ell}$.
+  Each $(D_\ell^{(h)})^{-1}$ application uses CG with Toeplitz
+  matvecs: $O(m\log m)$ per CG step.
+\item Solve $S\,\tilde a_g = b_g^{\text{eff}}$ via CG.
+  Each CG matvec applies $S = A - \sum_\ell B_\ell (D_\ell^{(h)})^{-1} B_\ell^*$,
+  requiring $L$ inner CG solves of size $m$ per outer CG step.
+  All Toeplitz, no NUFFTs.
+\item Recover $\tilde a_h^{(\ell)}
+  = (D_\ell^{(h)})^{-1}(\hat\kappa_{h,\ell} - B_\ell^* \tilde a_g)$.
+\item Transform back: $g = F\,D_g^{1/2}\,\tilde a_g$ etc.
+  Cost: $1{+}L$ NUFFTs (type~2).
+\end{enumerate}
+Total: $2(1{+}L)$ NUFFTs per E-step inner iteration.
+
+\paragraph{sigma\_diag.} Same as Approach~B: independent batched
+Hutchinson with $2(1{+}L)$ NUFFTs.
+
+\paragraph{M-step.} Feature-space Hutchinson probes with the
+Schur matvec (same as Approach~B). No NUFFTs.
+
+\paragraph{Cost per outer iteration.}
+E-step: $3 \times [2(1{+}L) + 2(1{+}L)] = 12(1{+}L) \approx 1140$
+NUFFTs (3$\times$ fewer than Block~CD). But the Schur CG matvec
+is expensive: each application requires $L$ inner CG solves,
+so the Toeplitz matvec count is high.
+
+\paragraph{Benchmark.} 619s total, 41.3s/iter.
+Speedup: \textbf{2.2$\times$} over joint.
+
+\paragraph{Tradeoff.} Fewer NUFFTs than Block~CD, but the nested
+CG (inner solves inside outer CG) has high Toeplitz overhead.
+Generalizes naturally to $d \geq 2$ since no matrix factorization
+is needed.
+
+%% ================================================================
+\section{Approach D: Direct Schur (dense factorization)}
+
+\paragraph{Key idea.} Since $m \approx 25$ (for $d{=}1$ with
+typical lengthscales), explicitly form $T_\ell$, $A$, $D_\ell^{(h)}$,
+$B_\ell$, and $S$ as dense $m{\times}m$ matrices, then use Cholesky
+factorization for all solves. This eliminates CG entirely from the
+E-step and M-step.
+
+\paragraph{Block construction.}
+Form each $T_\ell \in \C^{m \times m}$ by applying the Toeplitz
+embedding to $m$ standard basis vectors: cost $O(m^2 \log m)$ per site.
+Then:
+\begin{align}
+  A &= I + D_g^{1/2}\, T_{\mathrm{all}}\, D_g^{1/2}, &
+  &\text{Cholesky: } O(m^3) \\
+  D_\ell^{(h)} &= I + D_h^{1/2}\, T_\ell\, D_h^{1/2}, &
+  &\text{Cholesky: } O(Lm^3) \\
+  B_\ell &= D_g^{1/2}\, T_\ell\, D_h^{1/2}, &
+  &O(Lm^2) \\
+  S &= A - \textstyle\sum_\ell B_\ell\, (D_\ell^{(h)})^{-1}\, B_\ell^*, &
+  &\text{Cholesky: } O(Lm^3)
+\end{align}
+Total: $O(Lm^3)$. With $L{=}94$, $m{=}25$: $\sim 1.5 \times 10^6$
+ops. \textbf{Negligible} ($< 1$\,ms).
+
+\paragraph{E-step.}
+\begin{enumerate}
+\item Transform $\kappa$ to feature space: $1{+}L$ NUFFTs.
+\item Compute effective RHS using pre-factorized
+  $(D_\ell^{(h)})^{-1}$: direct backsolves, $O(Lm^2)$.
+\item Solve $S\,\tilde a_g = b_g^{\text{eff}}$: Cholesky backsolve,
+  $O(m^2)$.
+\item Recover $\tilde a_h^{(\ell)}$: direct backsolves, $O(Lm^2)$.
+\item Transform back: $1{+}L$ NUFFTs.
+\end{enumerate}
+Total: $2(1{+}L)$ NUFFTs + $O(Lm^2)$ algebra per inner iteration.
+
+\paragraph{sigma\_diag.}
+\textbf{Exact} Schur diagonal: compute $[M^{-1}]_{ii}$ for each
+observation using the Schur block inversion formulas and
+pre-factorized matrices. Can also use Hutchinson with direct
+solves (no CG). Cost: $2(1{+}L)$ NUFFTs.
+
+\paragraph{M-step.}
+\textbf{Exact trace} --- no Hutchinson probes needed.
+Since $S^{-1}$ and $\partial A/\partial\theta$ are available as
+dense $m{\times}m$ matrices:
+\begin{align}
+  \tr\bigl(M^{-1}\, \partial M / \partial\theta_g\bigr)
+  &= \tr\bigl(S^{-1}\, \partial A / \partial\theta_g\bigr), &
+  &O(m^2) \\
+  \tr\bigl(M^{-1}\, \partial M / \partial\theta_h\bigr)
+  &= \sum_\ell \bigl[\tr(\cdots) + 2\Re\,\tr(\cdots)\bigr], &
+  &O(Lm^2)
+\end{align}
+\textbf{Zero NUFFTs, zero CG, zero stochastic estimation.}
+
+\paragraph{Cost per outer iteration.}
+E-step: $3 \times 2(1{+}L) = 570$ NUFFTs + $O(Lm^2)$ dense algebra.
+M-step: $O(Lm^2)$ exact. \textbf{No CG anywhere.}
+
+\paragraph{Benchmark.} 159s total, 10.6s/iter.
+Speedup: \textbf{8.4$\times$} over joint.
+
+\paragraph{Limitation.} Requires $m$ to be small enough for dense
+$m{\times}m$ factorization ($m \lesssim 200$). This holds for $d{=}1$
+with typical lengthscales, but for $d \geq 2$ the spectral grid
+grows as $m^d$, making dense factorization infeasible. In that regime,
+Approach~C (Schur CG) is preferred.
+
+%% ================================================================
+\section{Comparison}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+& \textbf{A: Joint} & \textbf{B: Block CD} & \textbf{C: Schur CG} & \textbf{D: Direct} \\
+\midrule
+E-step solve & CG on $(1{+}L)m$ & CD sweeps, CG on $m$ & Schur CG on $m$ & Cholesky on $m$ \\
+E-step NUFFTs/inner & many (in CG) & $10(1{+}L)$ & $2(1{+}L)$ & $2(1{+}L)$ \\
+sigma\_diag & obs-space CG & indep.\ CG & indep.\ CG & exact / direct \\
+M-step & obs-space Hutch. & feat-space Hutch. & feat-space Hutch. & exact trace \\
+M-step NUFFTs & many & 0 & 0 & 0 \\
+CG required? & yes & yes & yes (nested) & \textbf{no} \\
+Exact joint post.? & yes & no (CD approx.) & yes & yes \\
+Scales to $d{\geq}2$? & yes & yes & yes & no ($m^d$) \\
+\midrule
+Time/iter (s) & 88.7 & 43.3 & 41.3 & \textbf{10.6} \\
+Total time (s) & 1331 & 649 & 619 & \textbf{159} \\
+Speedup vs A & 1.0$\times$ & 2.0$\times$ & 2.2$\times$ & \textbf{8.4$\times$} \\
+Final MAE & --- & 27.4 & 27.3 & 27.4 \\
+\bottomrule
+\end{tabular}
+\caption{Comparison on mosquito dataset ($n{=}24{,}513$, $L{=}94$, $m{\approx}25$,
+  15 outer iterations, 3 inner E-steps).}
+\end{table}
+
+\paragraph{Converged hyperparameters.}
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+& $\ell_g$ & $\sigma_g^2$ & $\ell_h$ & $\sigma_h^2$ & $r$ \\
+\midrule
+B: Block CD & 0.085 & 4.04 & 0.105 & 2.10 & 2.84 \\
+C: Schur CG & 0.196 & 1.57 & 0.072 & 1.17 & 2.84 \\
+D: Direct & 0.313 & 0.95 & 0.083 & 1.85 & 2.84 \\
+\bottomrule
+\end{tabular}
+\caption{Learned hyperparameters after 15 iterations.
+  Despite different $\ell_g / \sigma_g^2$ tradeoffs, all approaches
+  reach similar MAE (${\approx}27.4$), indicating that the posterior
+  predictive is robust to this identifiability.}
+\end{table}
+
+%% ================================================================
+\section{NUFFT budget analysis}
+
+NUFFTs are $O(n)$ and dominate wall-clock time. Toeplitz matvecs
+are $O(m\log m)$ and essentially free for $m{=}25$.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+& \textbf{B: Block CD} & \textbf{C: Schur CG} & \textbf{D: Direct} \\
+\midrule
+E-step (per inner) & $10(1{+}L)=950$ & $2(1{+}L)=190$ & $2(1{+}L)=190$ \\
+sigma\_diag (per inner) & $2(1{+}L)=190$ & $2(1{+}L)=190$ & $2(1{+}L)=190$ \\
+Inner iters $\times 3$ & 3420 & 1140 & 1140 \\
+M-step & 0 & 0 & 0 \\
+\midrule
+\textbf{Total per outer} & \textbf{3420} & \textbf{1140} & \textbf{1140} \\
+\bottomrule
+\end{tabular}
+\caption{NUFFT calls per outer iteration. Approaches C and D have identical
+NUFFT budgets; D is faster because it replaces CG with direct solves.}
+\end{table}
+
+%% ================================================================
+\section{Recommendations}
+
+\begin{itemize}
+\item \textbf{$d{=}1$, moderate $m$}: Use Approach~D (Direct Schur).
+  8.4$\times$ faster than joint, no CG, exact traces.
+  Works whenever $m \lesssim 200$.
+
+\item \textbf{$d \geq 2$ or very small lengthscale}:
+  Use Approach~C (Schur CG).
+  Same NUFFT budget as Direct but avoids dense $m^d {\times} m^d$
+  factorization. The nested CG adds Toeplitz overhead but
+  scales gracefully.
+
+\item \textbf{Approach B} (Block CD) is superseded: it uses
+  5$\times$ more NUFFTs than Schur-based approaches and
+  introduces a CD approximation error in the joint posterior.
+\end{itemize}
+
+\end{document}

@@ -1,0 +1,13 @@
+{
+  "seed": 0,
+  "n_spots": 300,
+  "n_genes": 4,
+  "n_svg": 2,
+  "n_train_spots": 167,
+  "n_test_spots": 133,
+  "our_metrics": {
+    "auroc": 1.0,
+    "auprc": 1.0,
+    "precision_at_k": 1.0
+  }
+}
