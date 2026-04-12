@@ -1,15 +1,32 @@
 # gp-quadrature
-Fast Gaussian Process regression with equispaced quadrature rules. 
+Fast Gaussian Process regression with equispaced quadrature rules.
 
-See efgnpd_basic_ex and efgnpd_ex for typical usage. 
-See hyper_learning_sanity_checks and efgpnd_sanity_checks for checks of the approximations for posterior mean, variance, and hyperparameter gradient updates. 
+See `efgpnd_basic_ex.ipynb` for typical usage.
+See `Hyper_learning_sanitychecks.ipynb` and `efgpnd_sanity_checks.ipynb` for
+approximation checks on posterior mean, variance, and hyperparameter gradients.
 
 ## Installation
 Clone the repository and install the package in development mode:
 
 ```
 git clone https://github.com/danbider/gp-quadrature.git
-cd gp-quadratures
+cd gp-quadrature
 pip install -e .
+```
+
+## Branch layout
+
+- `main` — core library, polished demo notebooks, sanity tests. Safe to share.
+- `dev` — `main` plus all in-progress scratch scripts, diagnostics, and
+  experimental figures. Default working branch. New exploratory code lands
+  here; stabilized pieces migrate to `main` via cherry-pick or targeted merge.
+- `backup/pre-reorg-2026-04-12` — tag snapshotting the pre-reorganization state.
+
+Recommended local layout: keep the primary checkout on `dev` and add a
+worktree for `main` so both branches are browseable side-by-side without
+`git checkout` churn:
+
+```
+git worktree add ../gp-quadrature-main main
 ```
 
