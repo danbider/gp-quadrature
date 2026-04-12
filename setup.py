@@ -13,6 +13,7 @@ setup(
     name="gp-quadratures",
     version="0.1.0",
     packages=find_packages(exclude=["tests*", "examples*"]),
+    py_modules=["efgpnd", "cg", "vanilla_gp_sampling"],
     install_requires=[
         # core dependencies
         "torch>=1.10.0",
