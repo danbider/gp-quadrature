@@ -259,6 +259,55 @@ def sample_gp_spectral_approx(
         return samples.squeeze(0)
     return samples.T.contiguous()
 
+
+def sample_gp_rff(
+    x: torch.Tensor,
+    length_scale: float = 1.0,
+    variance: float = 1.0,
+    num_features: int = 5000,
+    seed: Optional[int] = None,
+) -> torch.Tensor:
+    """
+    Sample from an SE GP prior using Random Fourier Features.
+
+    Draws random frequencies from the SE spectral density (Gaussian),
+    builds cos/sin features, and draws a sample via random weights.
+    With large num_features this is close to an exact GP sample but uses
+    a completely different mechanism from EFGP's deterministic quadrature,
+    so no method gets an unfair advantage.
+
+    Args:
+        x: Input points, shape (n, d)
+        length_scale: SE kernel length scale
+        variance: SE kernel variance (signal variance)
+        num_features: Number of random Fourier features (higher = more accurate)
+        seed: Optional random seed
+
+    Returns:
+        f: Sample of shape (n,)
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    if x.ndim == 1:
+        x = x.unsqueeze(-1)
+
+    n, d = x.shape
+    dtype = x.dtype
+    device = x.device
+
+    # Sample frequencies from spectral density of SE kernel: N(0, 1/ℓ² I)
+    omega = torch.randn(num_features, d, dtype=dtype, device=device) / length_scale
+    # Random phases
+    phi = torch.rand(num_features, dtype=dtype, device=device) * (2 * math.pi)
+    # Features: sqrt(2*variance/M) * cos(omega^T x + phi)
+    proj = x @ omega.T + phi.unsqueeze(0)  # (n, M)
+    features = math.sqrt(2.0 * variance / num_features) * torch.cos(proj)
+    # Sample weights and compute f = Phi @ w
+    w = torch.randn(num_features, dtype=dtype, device=device)
+    return features @ w
+
+
 def sample_gp_matern(
     x: torch.Tensor,
     nu: float = 1.5,

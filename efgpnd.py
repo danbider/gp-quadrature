@@ -23,6 +23,8 @@ def efgpnd_gradient_batched(
         mean_cg_init: Optional[torch.Tensor] = None,
         use_mean_cg_preconditioner: bool = True,
         use_trace_cg_preconditioner: bool = True,
+        frozen_grid: Optional[Tuple[torch.Tensor, float]] = None,
+        max_mtot_1d: Optional[int] = None,
         log_marginal_probes=100, log_marginal_steps=25):
     """
     Gradient of the N‑D GP log‑marginal likelihood estimated with
@@ -92,9 +94,26 @@ def efgpnd_gradient_batched(
         
         # Get frequency grid and weights
         with record_function("1_frequency_grid_setup"):
-            xis_1d, h, mtot = get_xis(kernel_obj=kernel, eps=eps, L=L, use_integral=True, l2scaled=False)#,trunc_eps=0.01)
-            grids = torch.meshgrid(*(xis_1d for _ in range(d)), indexing='ij') # makes tensor product Jm 
-            xis = torch.stack(grids, dim=-1).view(-1, d) 
+            if frozen_grid is not None:
+                xis_1d, h = frozen_grid
+                xis_1d = xis_1d.to(device=device, dtype=rdtype)
+                if torch.is_tensor(h):
+                    h = h.to(device=device, dtype=rdtype)
+                else:
+                    h = torch.tensor(h, device=device, dtype=rdtype)
+                mtot = xis_1d.numel()
+            else:
+                xis_1d, h, mtot = get_xis(kernel_obj=kernel, eps=eps, L=L, use_integral=True, l2scaled=False)#,trunc_eps=0.01)
+                if max_mtot_1d is not None and mtot > max_mtot_1d:
+                    # Cap mtot_1d: keep central (2*half+1) nodes, drop spectral tails.
+                    half = max_mtot_1d // 2
+                    center = mtot // 2
+                    keep_lo = center - half
+                    keep_hi = keep_lo + (2 * half + 1)
+                    xis_1d = xis_1d[keep_lo:keep_hi]
+                    mtot = xis_1d.numel()
+            grids = torch.meshgrid(*(xis_1d for _ in range(d)), indexing='ij') # makes tensor product Jm
+            xis = torch.stack(grids, dim=-1).view(-1, d)
             ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=cdtype) * h**d) # (mtot**d,1)
             Dprime  = (h**d * kernel.spectral_grad(xis)).to(cmplx)  # (M, 3)
             # print(xis.shape)
@@ -366,6 +385,7 @@ class EFGPND(nn.Module):
         nufft_eps: float = 1e-4,
         opts: Optional[Dict] = None,
         estimate_params: bool = True,
+        param_transform: str = "softplus",
     ):
         """
         Equispaced‑Fourier Gaussian Process (EFGP) regression in d dimensions.
@@ -381,6 +401,7 @@ class EFGPND(nn.Module):
         opts        : dictionary of options for auxiliary methods
                     (e.g., `max_cg_iter` for CG solver)
         estimate_params : whether to initialize lengthscales and noise by MLE
+        param_transform : "softplus" (default, matches GPyTorch) or "exp" (legacy)
         """
         super().__init__()
         self.x = x
@@ -446,7 +467,8 @@ class EFGPND(nn.Module):
             # Temporarily set default dtype to match input data
             torch.set_default_dtype(x.dtype)
             # Create GP parameters - these will now use the input data's dtype
-            self._gp_params = GPParams(kernel=kernel, init_sig2=(sigmasq or 0.1))
+            self._gp_params = GPParams(kernel=kernel, init_sig2=(sigmasq or 0.1),
+                                       transform=param_transform)
             # Register parameters
             self.register_parameter("gp_params", self._gp_params.raw)
             # Ensure the kernel has a reference to GPParams (this is also done in GPParams.__init__)
@@ -583,6 +605,8 @@ class EFGPND(nn.Module):
         log_marginal_probes: int = 100,
         log_marginal_steps: int = 25,
         verbose: bool = False,
+        frozen_grid: Optional[Tuple[torch.Tensor, float]] = None,
+        max_mtot_1d: Optional[int] = None,
         **kwargs
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -668,6 +692,8 @@ class EFGPND(nn.Module):
             mean_cg_init=self._last_gradient_beta if use_mean_cg_warm_start else None,
             use_mean_cg_preconditioner=use_mean_cg_preconditioner,
             use_trace_cg_preconditioner=use_trace_cg_preconditioner,
+            frozen_grid=frozen_grid,
+            max_mtot_1d=max_mtot_1d,
             **log_marginal_kwargs,
             **kwargs
         )
@@ -686,12 +712,12 @@ class EFGPND(nn.Module):
         if grads.ndim == 0:
             grads = grads.unsqueeze(0)  # Convert scalar to 1D tensor
         
-        # Transform to raw space gradient via chain rule
-        pos_vec = self._gp_params.pos.to(device=self.device)
-        # Make sure the gradient has the same dtype as the model parameters
+        # Transform to raw space gradient via chain rule: d(NLL)/d(raw) = d(NLL)/d(pos) * d(pos)/d(raw)
+        jacobian = self._gp_params.raw_jacobian().detach().to(device=self.device)
         param_dtype = self._gp_params.raw.dtype
+        n = self.x.shape[0]
         raw_grad = torch.stack([
-            grads[i].detach().to(device=self.device, dtype=param_dtype) * pos_vec[i]
+            grads[i].detach().to(device=self.device, dtype=param_dtype) * jacobian[i] / n
             for i in range(len(grads))
         ], dim=0)
         
@@ -1078,6 +1104,10 @@ class EFGPND(nn.Module):
         compute_log_marginal: bool = False,   # Whether to compute log marginal likelihood
         verbose: bool = False,                # Print detailed information (changed to default True to help debug)
         trace_samples: int = 10,             # Number of trace samples to use
+        freeze_quad_grid: bool = False,       # If True, compute quadrature grid once at init and reuse throughout training
+        frozen_grid: Optional[Tuple[torch.Tensor, float]] = None,  # Pre-built (xis_1d, h); overrides freeze_quad_grid
+        max_mtot_1d: Optional[int] = None,    # Explicit cap on per-dim grid size
+        ls_design: Optional[float] = None,    # Derive max_mtot_1d from get_xis(ls=ls_design, eps=self.eps)
 
         **gkwargs,                             # forwarded to compute_gradients
     ):
@@ -1131,6 +1161,32 @@ class EFGPND(nn.Module):
         
         history['sigmasq'] = [float(self.sigmasq.item())]
         
+        # Derive max_mtot_1d from ls_design if provided
+        if ls_design is not None and max_mtot_1d is None:
+            L_val = torch.max(torch.max(self.x, dim=0).values - torch.min(self.x, dim=0).values)
+            L_val = float(L_val) if float(L_val) > 1e-9 else 1.0
+            from copy import deepcopy
+            ker_design = deepcopy(self.kernel)
+            ker_design.set_hyper('lengthscale', float(ls_design))
+            _, _, max_mtot_1d = get_xis(
+                kernel_obj=ker_design, eps=self.eps, L=L_val,
+                use_integral=True, l2scaled=False,
+            )
+            print(f"max_mtot_1d = {max_mtot_1d} (from ls_design={ls_design:g}, eps={self.eps:g})")
+
+        # Build frozen quadrature grid if requested
+        if frozen_grid is None and freeze_quad_grid:
+            L_val = torch.max(torch.max(self.x, dim=0).values - torch.min(self.x, dim=0).values)
+            L_val = float(L_val) if float(L_val) > 1e-9 else 1.0
+            xis_1d_frozen, h_frozen, mtot_frozen = get_xis(
+                kernel_obj=self.kernel, eps=self.eps, L=L_val,
+                use_integral=True, l2scaled=False,
+            )
+            frozen_grid = (xis_1d_frozen.to(device=device, dtype=rdtype), float(h_frozen))
+            print(f"Frozen quadrature grid: mtot_1d={mtot_frozen}, h={h_frozen:.6g} (built from eps={self.eps:g} at init hypers)")
+        elif frozen_grid is not None:
+            print(f"Using user-supplied frozen grid: mtot_1d={frozen_grid[0].numel()}, h={float(frozen_grid[1]):.6g}")
+
         start_time = time.time()
         print(f"Optimizing hyperparameters using {optimizer if isinstance(optimizer, str) else optimizer.__class__.__name__}")
 
@@ -1159,6 +1215,8 @@ class EFGPND(nn.Module):
                     apply_gradients=True,  # Apply gradients directly
                     compute_log_marginal=True,
                     verbose=verbose,
+                    frozen_grid=frozen_grid,
+                    max_mtot_1d=max_mtot_1d,
                     **gkwargs
                 )
                 history['log_marginal'].append(float(log_marginal.item() if isinstance(log_marginal, torch.Tensor) else log_marginal))
@@ -1169,6 +1227,8 @@ class EFGPND(nn.Module):
                     apply_gradients=True,  # Apply gradients directly
                     compute_log_marginal=False,
                     verbose=verbose,
+                    frozen_grid=frozen_grid,
+                    max_mtot_1d=max_mtot_1d,
                     **gkwargs
                 )
             

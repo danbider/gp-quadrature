@@ -1,0 +1,44 @@
+\documentclass[aspectratio=169]{beamer}
+\usetheme{default}
+\usecolortheme{seahorse}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}{}
+
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+
+\begin{document}
+
+\begin{frame}{Motivation}
+\begin{columns}[c]  % vertically centred
+
+\begin{column}{0.54\textwidth}
+Consider a Gaussian Process regression setup:
+
+\vspace{0.4em}
+\begin{gather*}
+y \mid f = f(x) + \mathcal{N}(0,\sigma^2) \\[2pt]
+\text{or} \quad y \mid f \sim \operatorname{Bern}\!\bigl(\sigma(f(x))\bigr)
+  \quad \text{etc.} \\[6pt]
+f(X) \sim \mathcal{GP}(0,\, K_\theta).
+\end{gather*}
+
+\vspace{0.3em}
+This setup is common in:
+\begin{enumerate}
+    \item Spatial statistics, meteorology
+    \item Astrophysics
+    \item Neuroscience (e.g.\ time series of firing rates)
+    \item Spatial transcriptomics
+\end{enumerate}
+\end{column}
+
+\begin{column}{0.44\textwidth}
+\centering
+\includegraphics[width=\linewidth]{GP.pdf}
+\end{column}
+
+\end{columns}
+\end{frame}
+
+\end{document}

@@ -196,15 +196,15 @@ def fit_ski_gp(
     init_lengthscale: Optional[float] = None,
     init_outputscale: Optional[float] = None,
     init_noise: Optional[float] = None,
-    cg_tolerance: float = 1e-3,
+    cg_tolerance: float = 1,
     eval_cg_tolerance: Optional[float] = None,
-    max_cg_iterations: int = 100,
-    max_preconditioner_size: int = 10,
-    max_lanczos_quadrature_iterations: int = 10,
-    num_trace_samples: int = 2,
+    max_cg_iterations: int = 1000,
+    max_preconditioner_size: int = 15,
+    max_lanczos_quadrature_iterations: int = 20,
+    num_trace_samples: int = 10,
     checkpoint_size: Optional[int] = None,
     use_toeplitz: bool = True,
-    memory_efficient: bool = True,
+    memory_efficient: bool = False,
     verbose: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -281,6 +281,17 @@ def fit_ski_gp(
         "elapsed_sec": [],
         "rss_gb": [],
     }
+
+    # Log initial hyperparameters at iter 0
+    history["iteration"].append(0)
+    history["loss"].append(float("nan"))
+    history["lengthscale"].append(float(model.base_kernel.lengthscale.detach().reshape(-1).mean().item()))
+    history["outputscale"].append(float(model.covar_module.outputscale.detach().item()))
+    history["noise"].append(float(likelihood.noise.detach().item()))
+    history["forward_sec"].append(0.0)
+    history["backward_sec"].append(0.0)
+    history["elapsed_sec"].append(0.0)
+    history["rss_gb"].append(_rss_gb())
 
     best_loss = float("inf")
     best_model_state = None

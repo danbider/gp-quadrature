@@ -1343,11 +1343,13 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
             )
             grad = mstep_out["grad"].real
 
-            raw = self.kernel_._gp_params_ref.raw
+            gp_params = self.kernel_._gp_params_ref
+            raw = gp_params.raw
+            jac = gp_params.raw_jacobian().detach()
             raw.grad = torch.stack(
                 [
-                    grad[0].to(dtype=raw.dtype, device=raw.device) * self.kernel_.lengthscale,
-                    grad[1].to(dtype=raw.dtype, device=raw.device) * self.kernel_.variance,
+                    grad[0].to(dtype=raw.dtype, device=raw.device) * jac[0],
+                    grad[1].to(dtype=raw.dtype, device=raw.device) * jac[1],
                     torch.tensor(0.0, dtype=raw.dtype, device=raw.device),
                 ]
             )
