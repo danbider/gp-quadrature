@@ -244,14 +244,18 @@ Solve for $\alpha$:
 \textbf{Version 2: $m\times m$ system}:
 
 \begin{align}
-(K^{-1} + \Delta) v = z &\iff (I + K\Delta)v = Kz\\
+(K^{-1} + \Delta) v = z &\iff (I + K\Delta)v = Kz\label{setup}\\
 &\iff (I + \Phi \Phi^* \Delta) v =  \Phi \Phi^*z \\
 &\iff (I+ \Phi \Phi^* \Delta) \Phi u = \Phi \Phi^* z\label{image}\\
 &\iff \Phi \left[ u + \Phi^* \Delta \Phi u\right] = \Phi\Phi^* z\\
 &\iff (I + \Phi^* \Delta \Phi) u =\Phi^* z \text{ solve for u} \label{cancel}\\
 &\text{ solve the above for $u$ and substitute } v = \Phi u.
 \end{align}
-Note that in \ref{image}, we can rearrange and see that $v \in \operatorname{Range}(\Phi)$. Also in \ref{cancel}, we can "cancel" the $\Phi$ on both sides since $\Phi$ is injective, since $\{\exp(i\omega_jx)\}_{j\in [M]}$ are linearly independent. 
+Note that in \ref{image}, we can rearrange and see that $v \in \operatorname{Range}(\Phi)$ (using line \ref{setup}:
+$$(K^{-1} + \Delta ) v = z \implies v + K\Delta v = Kz \implies v = K(z-\Delta v).$$
+
+
+Also in \ref{cancel}, we can "cancel" the $\Phi$ on both sides since $\Phi$ is injective, since $\{\exp(i\omega_jx)\}_{j\in [M]}$ are linearly independent. 
 \paragraph{Stable feature-space path actually used in the E-step.}
 The derivation above gives the direct identity
 \[
@@ -492,15 +496,18 @@ Hence we can cancel the third term and write:
 & = I - \frac{1}{2}\tr(\Delta FD'F^* (I+\Delta K)^{-1})
 \end{align}
 
-This is an improvement over before since that inverse is well-conditioned. The idea to solve it efficiently is to approximate $\Delta$ as constant times identity. Let $\alpha := (I+\Delta K)^{-1} z.$ Then     $z = (I + \Delta FD^2)F^* \alpha$ and:
+This is an improvement over before since that inverse is well-conditioned. 
 
 
-\begin{align}
-    F^* z &= (I+ F^* \Delta FD^2) F^* \alpha \\
-    &\approx (I + \bar \delta TD^2) F^* \alpha.
-\end{align}
+% The idea to solve it efficiently is to approximate $\Delta$ as constant times identity. Let $\alpha := (I+\Delta K)^{-1} z.$ Then     $z = (I + \Delta FD^2)F^* \alpha$ and:
 
-Solve the second system using Toeplitz machinery, then warm start the above system--should only take a  few iterations to converge with this warm start. 
+
+% \begin{align}
+%     F^* z &= (I+ F^* \Delta FD^2) F^* \alpha \\
+%     &\approx (I + \bar \delta TD^2) F^* \alpha.
+% \end{align}
+
+% Solve the second system using Toeplitz machinery, then warm start the above system--should only take a  few iterations to converge with this warm start. 
 
 \\\\
 
