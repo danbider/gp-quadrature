@@ -14,3 +14,18 @@ efgp3d.py
 *.h5ad
 *.csv
 polyagamma_classification/GPcounts/*
+
+# figures/ is for local-only generated plots. Populated by the
+# 2026-04-12 reorg with loose top-level figures; never committed.
+figures/
+
+# LaTeX build intermediates
+*.aux
+*.fdb_latexmk
+*.fls
+*.nav
+*.out
+*.snm
+*.synctex.gz
+*.toc
+# *.log intentionally not globbed — collides with application logs/
