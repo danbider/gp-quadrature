@@ -133,24 +133,28 @@ The variance shortcut and noise line both read $\alpha$ as an $N$-vector, which 
 
 Two observations eliminate line~3:
 
-\paragraph{(a) Variance has a generic $D'$ path.}
+\paragraph{(a) Variance has a generic $D'$ path -- which blows up under loose CG.}
 Since $\partial_{\sigma_f^2}\hat k = \hat k/\sigma_f^2$ gives $D'_{\sigma_f^2} = D^2/\sigma_f^2$,
 \begin{equation}
   T_2(\sigma_f^2) = \langle F^*\alpha, D'_{\sigma_f^2}\, F^*\alpha\rangle
-                 = \|D\, F^*\alpha\|^2/\sigma_f^2,
+                 = \|D\, F^*\alpha\|^2/\sigma_f^2
 \end{equation}
-purely $M$-space. No shortcut needed; the variance column of \texttt{spectral\_grad} is already the right diagonal.
+is mathematically exact. Numerically, however, $F^*\alpha$ is built via the Toeplitz residual $F^*\alpha = (Fy - T(D\beta_0))/\sigma^2$, and at inexact CG the quantity $D\,F^*\alpha$ picks up the CG residual amplified by $1/\sigma^2$. Writing $r = D Fy - A_{\text{mean}}\beta_0$,
+\begin{equation}
+  D F^*\alpha = (D Fy - DTD\beta_0)/\sigma^2 = \beta_0 + r/\sigma^2,
+\end{equation}
+so $\|D F^*\alpha\|^2 = \|\beta_0\|^2 + 2\Re\{\beta_0^* r\}/\sigma^2 + \|r\|^2/\sigma^4$. The $\|r\|^2/\sigma^4$ term is \emph{quadratic} in the residual and wrecks the gradient when $\sigma^2$ shrinks during training (e.g.\ $\sigma^2 \sim 10^{-2}$, $\mathrm{cg\_tol}=10^{-3}$, $N=2.5{\cdot}10^5$: the error flips the sign of $\nabla_{\sigma_f^2}$ and drives $\sigma_f^2$ to infinity). The fix: use
+\begin{equation}
+  \boxed{\; T_2(\sigma_f^2)\;\sigma_f^2 \;=\; \|\beta_0\|^2, \;}
+\end{equation}
+which is the same value at CG convergence ($D F^*\alpha = \beta_0$), but whose error is \emph{linear} in the CG residual ($O(\mathrm{cg\_tol})$, no $1/\sigma^2$ or $1/\sigma^4$ amplification). All other kernel hypers stay on the $D'$ path.
 
 \paragraph{(b) Noise needs a scalar Woodbury identity.}
-Since $\partial_{\sigma^2}\Ktil = I$ is \emph{not} of $FD'F^*$ form, there is no sandwich trick for the noise $T_2$. However, the scalar $\|\alpha\|^2$ has a closed-form in $M$-space. Expand
+Since $\partial_{\sigma^2}\Ktil = I$ is \emph{not} of $FD'F^*$ form, there is no sandwich trick for the noise $T_2$. The scalar $\|\alpha\|^2$ has a direct $M$-space expansion:
 \begin{equation}
-  \|\alpha\|^2 = \sigma^{-4}\bigl(\|y\|^2 - 2\Re\{\beta_0^* D F^*y\} + \beta_0^*\, DTD\,\beta_0\bigr),
+  \boxed{\;\|\alpha\|^2 \;=\; \sigma^{-4}\bigl(\|y\|^2 - 2\Re\{\beta_0^* D F^*y\} + \beta_0^*\, DTD\,\beta_0\bigr).\;}
 \end{equation}
-then use $A_{\text{mean}}\beta_0 = D F^*y \Rightarrow \beta_0^* DTD\,\beta_0 = \beta_0^* DF^*y - \sigma^2\|\beta_0\|^2$:
-\begin{equation}
-  \boxed{\;\|\alpha\|^2 = \sigma^{-4}\Bigl(\|y\|^2 - \Re\{\beta_0^* D F^*y\} - \sigma^2\|\beta_0\|^2\Bigr).\;}
-\end{equation}
-All three ingredients are already on hand after the CG solve, so this costs $\bigo(M)$.
+This is the literal expansion of $\|(y - FD\beta_0)/\sigma^2\|^2$ and does \emph{not} invoke $A_{\text{mean}}\beta_0 = DF^*y$, so it is robust to CG residual (unlike the Woodbury-simplified $\sigma^{-4}(\|y\|^2 - c - \sigma^2\|\beta_0\|^2)$, which leaks $\beta_0^*\,r/\sigma^4$). All ingredients are on hand after the CG solve: $c := \Re\{\beta_0^* DFy\}$ is needed anyway, and $\beta_0^* DTD \beta_0 = \langle\beta, T\beta\rangle$ with $\beta := D\beta_0$ reuses the already-computed $T\beta$ from $F^*\alpha$. Cost: $\bigo(M)$.
 Everything after the single setup NUFFT $F^*y$ lives in $M$-space.
 
 \begin{algorithm}[h]
@@ -161,10 +165,12 @@ Everything after the single setup NUFFT $F^*y$ lives in $M$-space.
 \State Solve $A_{\text{mean}}\beta_0 = D\cdot Fy$ by CG.
 \State $F^*\alpha \leftarrow (Fy - T(D\beta_0))/\sigma^2$ \Comment{Toeplitz}
 \State $c \leftarrow \Re\{\beta_0^*\, D\, Fy\}$ \Comment{reusable $M$-dot}
-\State For each kernel hyper $\theta$: $T_2(\theta) = \langle F^*\alpha, D'_\theta F^*\alpha\rangle$
+\State For each kernel hyper $\theta\ne\sigma_f^2$: $T_2(\theta) = \langle F^*\alpha, D'_\theta F^*\alpha\rangle$
 \Comment{$M$-space}
-\State Noise: $T_2(\sigma^2) = \sigma^{-4}\bigl(\|y\|^2 - c - \sigma^2\|\beta_0\|^2\bigr)$
+\State Variance (CG-robust): $T_2(\sigma_f^2) = \|\beta_0\|^2/\sigma_f^2$
 \Comment{$M$-space scalar}
+\State Noise: $T_2(\sigma^2) = \sigma^{-4}\bigl(\|y\|^2 - 2c + \beta_0^* DTD\beta_0\bigr)$
+\Comment{$M$-space scalar, CG-robust}
 \end{algorithmic}
 \end{algorithm}
 
@@ -210,8 +216,9 @@ Per-hyper cost for Term 1 after the switch is $T_p \times (2\text{ Toeplitz} + 1
 \State $F^*\alpha \leftarrow (Fy - T(D\beta_0))/\sigma^2$
 \hfill ($M\log M$)
 \State $c \leftarrow \Re\{\beta_0^* D Fy\}$
-\State \textbf{Term 2 -- kernel hypers (incl.\ variance):}  $T_2(\theta) \leftarrow \langle F^*\alpha, D'_\theta F^*\alpha\rangle$
-\State \textbf{Term 2 -- noise:}  $T_2(\sigma^2) \leftarrow \sigma^{-4}(\|y\|^2 - c - \sigma^2\|\beta_0\|^2)$
+\State \textbf{Term 2 -- non-variance kernel hypers:}  $T_2(\theta) \leftarrow \langle F^*\alpha, D'_\theta F^*\alpha\rangle$
+\State \textbf{Term 2 -- variance (CG-robust):}  $T_2(\sigma_f^2) \leftarrow \|\beta_0\|^2/\sigma_f^2$
+\State \textbf{Term 2 -- noise (CG-robust):}  $T_2(\sigma^2) \leftarrow \sigma^{-4}(\|y\|^2 - 2c + \beta_0^*\,DTD\,\beta_0)$
 \State Draw $V, V_n \in\{\pm1\}^{T_p\times M}$.
 \State \textbf{Stack RHSs} for Term 1:
 \State \quad kernel block (skip variance): for each trace hyper $\theta$, $u_\theta\leftarrow D'_\theta V$; $y_1^\theta\leftarrow T u_\theta$; rhs$^\theta\leftarrow D y_1^\theta$.
