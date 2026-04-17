@@ -165,51 +165,49 @@ def efgpnd_gradient_batched(
             beta = cg_mean.solve()
             beta_raw = beta.detach().clone()
             beta.mul_(ws)
-            z = fwd(beta)
-            alpha = y.to(dtype=cdtype).clone()
-            alpha.sub_(z)
-            alpha.div_(sigmasq_eff)
-            # alpha = (y - fwd(ws * beta)) / sigmasq # (\tilde{K} +sigma^2 I)^{-1} y
+            # alpha is reconstructable from M-space ingredients via Woodbury;
+            # see scratch/bd_prime_trace.tex for the algebra.
 
-        # 5)  Term‑2  (α*D'α, α*α) --------------------------------------------
+        # 5)  Term‑2  (α*D'α, α*α) — purely M-space ---------------------------
         with record_function("5_compute_term2"):
             fadj_alpha = Fy.clone().sub_(toeplitz(beta)).div(sigmasq_eff)
-            # fadj_alpha = (Fy - toeplitz(beta))/sigmasq # this is faster than fadj(alpha)
+            # M-space Woodbury scalars (eliminate the forward NUFFT for α):
+            y_norm2    = torch.dot(y, y)
+            c_scalar   = torch.vdot(beta_raw, ws * Fy).real
+            beta_norm2 = torch.vdot(beta_raw, beta_raw).real
+            alpha_norm = (y_norm2 - c_scalar - sigmasq_eff * beta_norm2) / (sigmasq_eff ** 2)
+            # generic D' path covers every kernel hyper (variance included via
+            # D'_{σf²} = D²/σf² from spectral_grad):
             term2_kernel = torch.stack([
                 torch.vdot(fadj_alpha, Dprime[:, i] * fadj_alpha).real
                 for i in range(kernel_hyper_count)
             ])
-            alpha_norm = torch.vdot(alpha, alpha).real
-            if variance_idx is not None:
-                variance_scalar = torch.as_tensor(
-                    kernel.get_hyper("variance"),
-                    device=device,
-                    dtype=rdtype,
-                )
-                y_alpha = torch.vdot(y.to(dtype=cdtype), alpha).real
-                term2_kernel[variance_idx] = (y_alpha - sigmasq_eff * alpha_norm) / variance_scalar
             term2 = torch.cat((term2_kernel, alpha_norm.unsqueeze(0)))
 
-        # 6)  Monte‑Carlo trace (Term‑1) ---------------------------------------
+        # 6)  Monte‑Carlo trace (Term‑1) — pure M-space (BD' Hutchinson) ------
         with record_function("6_monte_carlo_trace"):
             T  = trace_samples
             trace_kernel_count = len(trace_kernel_indices)
             if trace_kernel_count > 0:
-                Z = torch.empty((T, N), device=device, dtype=dtype)
-                Z.bernoulli_(0.5)
-                Z.mul_(2).sub_(1)
-                Z = Z.to(cmplx)
-                fadjZ = fadj(Z)
-                fadjZ_flat = fadjZ.reshape(T, -1)
-                Di_FZ_all = torch.stack(
-                    [Dprime[:, i] * fadjZ_flat for i in trace_kernel_indices],
-                    dim=0
-                ).reshape(-1, fadjZ_flat.shape[-1])
-                rhs_all_kernel = fwd(Di_FZ_all).reshape(trace_kernel_count, T, -1)
-                B_all_kernel = ws * toeplitz(Di_FZ_all).reshape(trace_kernel_count, T, -1)
+                # M-space Rademacher probes for kernel hypers; BD' form has same
+                # eigenvalues as the N-space operator and is strictly tighter
+                # in Frobenius (lower Hutchinson variance). Costs no NUFFTs.
+                V_kernel = torch.empty((T, ws.numel()), device=device, dtype=dtype)
+                V_kernel.bernoulli_(0.5)
+                V_kernel.mul_(2).sub_(1)
+                V_kernel = V_kernel.to(cmplx)
+                Dp_stack = torch.stack(
+                    [Dprime[:, i] for i in trace_kernel_indices], dim=0
+                )                                                       # (Kc, M)
+                Di_V_flat = (Dp_stack.unsqueeze(1) * V_kernel.unsqueeze(0)).reshape(
+                    trace_kernel_count * T, -1
+                )
+                y1_kernel = toeplitz(Di_V_flat)                         # T D' V (reused)
+                B_all_kernel = (ws * y1_kernel).reshape(trace_kernel_count, T, -1)
             else:
+                V_kernel = None
+                y1_kernel = None
                 B_all_kernel = torch.empty((0, T, ws.numel()), device=device, dtype=cmplx)
-                rhs_all_kernel = torch.empty((0, T, N), device=device, dtype=cmplx)
 
             # ------------------------------------------------------------------
             #  add the noise‑variance block (hyper‑parameter index == Hk)
@@ -249,13 +247,12 @@ def efgpnd_gradient_batched(
 
             term1 = torch.empty(num_hypers, device=device, dtype=rdtype)
             if trace_kernel_count > 0:
-                Beta_kernel.mul_(ws)
-                fwdBeta = fwd(Beta_kernel)
-                R_all_kernel = rhs_all_kernel.reshape(kernel_rows, -1).clone()
-                R_all_kernel.sub_(fwdBeta)
-                R_all_kernel.div_(sigmasq_eff)
-                Alpha_batch = R_all_kernel.view(trace_kernel_count, T, -1)
-                term1_kernel = (Z.unsqueeze(0) * Alpha_batch).sum(dim=2).mean(1).real
+                # BD' M-space estimator:
+                #   Bu = (T D' V - T D Beta_kernel) / σ²,    T1(θ) = mean_k <V_k, (Bu)_k>
+                # No NUFFTs.
+                y2_kernel = toeplitz(ws * Beta_kernel)
+                Bu = ((y1_kernel - y2_kernel) / sigmasq_eff).view(trace_kernel_count, T, -1)
+                term1_kernel = (V_kernel.unsqueeze(0) * Bu).sum(dim=2).mean(1).real
                 for slot, kernel_idx in enumerate(trace_kernel_indices):
                     term1[kernel_idx] = term1_kernel[slot]
 
@@ -304,7 +301,8 @@ def efgpnd_gradient_batched(
                         probes=log_marginal_probes,
                         steps=log_marginal_steps,
                         dtype=rdtype, device=device, n=N)
-                vdot_term = torch.vdot(y.to(cdtype), alpha).real
+                # vdot(y, alpha) = y^T K_tilde^{-1} y in M-space (Woodbury):
+                vdot_term = (y_norm2 - c_scalar) / sigmasq_eff
                 log_marginal = (-0.5 * vdot_term - 0.5*det_term -0.5*N*math.log(2*math.pi)).to(dtype=rdtype)
 
 
