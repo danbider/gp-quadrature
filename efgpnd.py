@@ -151,18 +151,29 @@ def efgpnd_gradient_batched(
 
         # 5)  Term‑2  (α*D'α, α*α) — purely M-space ---------------------------
         with record_function("5_compute_term2"):
-            fadj_alpha = Fy.clone().sub_(toeplitz(beta)).div(sigmasq_eff)
-            # M-space Woodbury scalars (eliminate the forward NUFFT for α):
+            # ||α||² via direct expansion of ||y - FDβ₀||²/σ⁴ — does NOT use
+            # the CG equation (robust to loose cg_tol / tiny σ²; the Woodbury-
+            # simplified form leaks β₀*·(DFy − Aβ₀)/σ⁴ in σ→0 regimes).
+            Tbeta = toeplitz(beta)
+            fadj_alpha = (Fy - Tbeta).div(sigmasq_eff)
             y_norm2    = torch.dot(y, y)
-            c_scalar   = torch.vdot(beta_raw, ws * Fy).real
-            beta_norm2 = torch.vdot(beta_raw, beta_raw).real
-            alpha_norm = (y_norm2 - c_scalar - sigmasq_eff * beta_norm2) / (sigmasq_eff ** 2)
-            # generic D' path covers every kernel hyper (variance included via
-            # D'_{σf²} = D²/σf² from spectral_grad):
+            c_scalar   = torch.vdot(beta_raw, ws * Fy).real       # Re{<β₀, D·Fy>}
+            beta_T_beta = torch.vdot(beta, Tbeta).real            # ||FDβ₀||² via T=F*F
+            alpha_norm = (y_norm2 - 2 * c_scalar + beta_T_beta) / (sigmasq_eff ** 2)
+            # generic D' path covers non-variance kernel hypers:
             term2_kernel = torch.stack([
                 torch.vdot(fadj_alpha, Dprime[:, i] * fadj_alpha).real
                 for i in range(kernel_hyper_count)
             ])
+            # Variance: use ||β₀||²/σf². At CG exactness D·F*α = β₀, so
+            # T_2(σf²)·σf² = ||D·F*α||² = ||β₀||². Under inexact CG, ||β₀||²
+            # has error linear in the residual (vs quadratic for the D'-path,
+            # which amplifies by ||r||²/σ⁴ and breaks when σ² shrinks).
+            if variance_idx is not None:
+                variance_scalar = torch.as_tensor(
+                    kernel.get_hyper("variance"), device=device, dtype=rdtype,
+                )
+                term2_kernel[variance_idx] = torch.vdot(beta_raw, beta_raw).real / variance_scalar
             term2 = torch.cat((term2_kernel, alpha_norm.unsqueeze(0)))
 
         # 6)  Monte‑Carlo trace (Term‑1) — pure M-space (BD' Hutchinson) ------
