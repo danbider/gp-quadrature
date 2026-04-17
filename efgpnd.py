@@ -233,11 +233,13 @@ def efgpnd_gradient_batched(
 
             term1 = torch.empty(num_hypers, device=device, dtype=rdtype)
             if trace_kernel_count > 0:
-                # BD' M-space estimator:
-                #   Bu = (T D' V - T D Beta_kernel) / σ²,    T1(θ) = mean_k <V_k, (Bu)_k>
-                # No NUFFTs.
-                y2_kernel = toeplitz(ws * Beta_kernel)
-                Bu = ((y1_kernel - y2_kernel) / sigmasq_eff).view(trace_kernel_count, T, -1)
+                # β-form M-space Hutchinson: at CG exactness BD'_θ V = X/D, so
+                #   T_1(θ) = mean_k <V_k, X_k/D>.
+                # Avoids the 1/σ² amplification of the (TD'V − TDX)/σ² form;
+                # see scratch/gradient_derivation.tex. Also saves one Toeplitz
+                # call vs the subtraction form.
+                inv_D = (1.0 / ws.real.clamp_min(torch.finfo(rdtype).tiny)).to(cmplx)
+                Bu = (Beta_kernel * inv_D).view(trace_kernel_count, T, -1)
                 term1_kernel = (V_kernel.unsqueeze(0) * Bu).sum(dim=2).mean(1).real
                 for slot, kernel_idx in enumerate(trace_kernel_indices):
                     term1[kernel_idx] = term1_kernel[slot]
