@@ -1,0 +1,150 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm,algpseudocode}
+\usepackage[margin=1in]{geometry}
+
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\bigo}{\mathcal{O}}
+\newcommand{\Ktil}{\widetilde K}
+\newcommand{\Amean}{A_{\text{mean}}}
+
+\title{EFGP log-marginal gradient: derivation and algorithm}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Log-marginal gradient}
+
+Let $\Ktil := K_\theta + \sigma^2 I$ with $K_\theta\in\mathbb{R}^{N\times N}$. For any hyper $\theta$,
+\begin{align}
+  \log p(y\mid\theta) &= -\tfrac12 y^\top \Ktil^{-1} y - \tfrac12\log\det\Ktil + \text{const}, \\
+  \partial_\theta\log p &= \tfrac12\bigl(T_2 - T_1\bigr),\quad
+  T_1(\theta) = \tr\!\bigl(\Ktil^{-1}\partial_\theta\Ktil\bigr),\quad
+  T_2(\theta) = y^\top \Ktil^{-1}\partial_\theta\Ktil\,\Ktil^{-1}y.
+\end{align}
+Let $\alpha := \Ktil^{-1}y$. Then $T_2(\theta) = \alpha^*\,\partial_\theta\Ktil\,\alpha$.
+
+\section{EFGP approximation}
+
+Pick an equispaced frequency grid $\{\xi_k\}_{k=1}^M\subset\mathbb{R}^d$ of spacing $h$. Define
+\begin{equation}
+  F\in\mathbb{C}^{N\times M},\quad F_{j,k} = e^{i2\pi x_j\cdot\xi_k},\qquad
+  D = \operatorname{diag}\bigl(\sqrt{h^d\,\hat k_\theta(\xi_k)}\bigr),\qquad
+  \Phi := FD.
+\end{equation}
+Then
+\begin{equation}
+  K_\theta \;\approx\; \Phi\Phi^* \;=\; FD^2F^*,\qquad
+  \partial_\theta K_\theta \;\approx\; F\,D'_\theta\,F^*,\quad
+  D'_\theta := \operatorname{diag}\bigl(h^d\,\partial_\theta\hat k_\theta(\xi_k)\bigr).
+\end{equation}
+Noise is outside the $FD'F^*$ family: $\partial_{\sigma^2}\Ktil = I$.
+
+Two $M{\times}M$ operators are available at $\bigo(M\log M)$:
+\begin{equation}
+  T := F^*F \text{ (multi-level Toeplitz)},\qquad
+  \Amean := \sigma^2 I + DTD = \sigma^2 I + \Phi^*\Phi.
+\end{equation}
+
+\section{Mean problem and $F^*\alpha$}
+
+Define $\beta_0 := \Amean^{-1}\,DF^*y$. Sherman--Morrison--Woodbury on $\Ktil = \sigma^2 I + \Phi\Phi^*$ gives
+\begin{equation}
+  \alpha = \Ktil^{-1}y = \sigma^{-2}\bigl(y - \Phi\beta_0\bigr) = \sigma^{-2}(y - FD\beta_0),
+\end{equation}
+and applying $F^*$,
+\begin{equation}
+  F^*\alpha = \sigma^{-2}\bigl(F^*y - T(D\beta_0)\bigr).\label{eq:fadj_alpha}
+\end{equation}
+
+\paragraph{Key identity.} The defining equation $\Amean\beta_0 = DF^*y$ expands as $\sigma^2\beta_0 + DTD\beta_0 = DF^*y$, hence
+\begin{equation}
+  D\bigl(F^*y - T(D\beta_0)\bigr) = \sigma^2\beta_0 \quad\Longrightarrow\quad
+  \boxed{\; D\,F^*\alpha \;=\; \beta_0\;}\qquad\text{(at CG convergence)}.\label{eq:dfstar_alpha}
+\end{equation}
+Equivalently, $F^*\alpha = \beta_0/D$ entrywise on $\operatorname{supp}(D)$.
+
+\section{$T_2$: all hypers in $M$-space}
+
+\paragraph{Kernel hypers.} Using $\partial_\theta K\approx FD'_\theta F^*$,
+\begin{equation}
+  T_2(\theta)
+  = \alpha^*\bigl(FD'_\theta F^*\bigr)\alpha
+  = \langle F^*\alpha,\, D'_\theta\,F^*\alpha\rangle
+  \overset{\eqref{eq:dfstar_alpha}}{=}
+  \boxed{\;\bigl\langle \beta_0,\, (D'_\theta/|D|^2)\,\beta_0\bigr\rangle.\;}\label{eq:T2kernel}
+\end{equation}
+The right form uses only $\beta_0$ (the CG output), no $F^*\alpha$. Under \emph{inexact} CG with residual $r := DF^*y - \Amean\beta_0$, eq.\,\eqref{eq:fadj_alpha} gives $DF^*\alpha = \beta_0 + r/\sigma^2$, so the $F^*\alpha$-form of $T_2$ carries error $\bigo(\|r\|/\sigma^2)$ and $\bigo(\|r\|^2/\sigma^4)$. The $\beta_0$-form's error is linear in the solution error $\|\beta_0 - \Amean^{-1}DF^*y\|$, with no $1/\sigma$ amplification.
+
+\paragraph{Variance $\sigma_f^2$.} For SE/Mat\'ern, $\hat k$ is linear in $\sigma_f^2$, so $D^2 = \sigma_f^2\cdot(\text{stuff})$, giving $D'_{\sigma_f^2} = D^2/\sigma_f^2$ and
+\begin{equation}
+  T_2(\sigma_f^2) = \|\beta_0\|^2/\sigma_f^2\qquad(\text{special case of \eqref{eq:T2kernel}}).
+\end{equation}
+
+\paragraph{Noise $\sigma^2$.} Since $\partial_{\sigma^2}\Ktil = I$, $T_2(\sigma^2) = \|\alpha\|^2$. Expand directly from $\sigma^2\alpha = y - FD\beta_0$:
+\begin{equation}
+  \boxed{\;\|\alpha\|^2 = \sigma^{-4}\bigl(\|y\|^2 - 2\Re\{\beta_0^*\,DF^*y\} + \beta_0^*\,DTD\,\beta_0\bigr).\;}
+\end{equation}
+This is the literal expansion of $\|y - FD\beta_0\|^2/\sigma^4$; it does \emph{not} invoke $\Amean\beta_0 = DF^*y$, so it is CG-robust. All three scalars are $M$-dots on already-computed vectors ($F^*y$, $D\beta_0$, $T(D\beta_0)$).
+
+\section{$T_1$: trace in $M$-space}
+
+\paragraph{Kernel hypers.} By cyclicity,
+\begin{equation}
+  T_1(\theta) = \tr\!\bigl(\Ktil^{-1}FD'_\theta F^*\bigr) = \tr(B\,D'_\theta),\qquad
+  B := F^*\Ktil^{-1}F \in\mathbb{C}^{M\times M}.
+\end{equation}
+Woodbury on $\Ktil^{-1}$:
+\begin{equation}
+  B = \sigma^{-2}\bigl(T - TD\,\Amean^{-1}\,DT\bigr).\label{eq:B}
+\end{equation}
+Hutchinson with Rademacher probes $V\in\{\pm1\}^{T_p\times M}$:
+\begin{equation}
+  T_1(\theta)\approx \frac{1}{T_p}\sum_{k=1}^{T_p} v_k^*\,B\,D'_\theta\,v_k
+  \overset{\eqref{eq:B}}{=}\frac{1}{T_p}\sum_k v_k^*\,\sigma^{-2}\bigl(T u_k^\theta - TD\,\Amean^{-1}\,DTu_k^\theta\bigr),
+\end{equation}
+where $u_k^\theta := D'_\theta v_k$. Each probe costs $2$ Toeplitz mat-vecs $+$ $1$ solve against $\Amean$; \textbf{no NUFFT}.
+
+\paragraph{Noise.} $\tr(\Ktil^{-1}) = \sigma^{-2}\bigl(N - \tr(\Amean^{-1}DTD)\bigr)$, estimated by Hutchinson on $\Amean^{-1}DTD$ (same batched CG).
+
+\paragraph{Variance (closed form).} $K = \sigma_f^2\cdot(\partial_{\sigma_f^2}K)$, so
+\begin{equation}
+  T_1(\sigma_f^2) = \frac{1}{\sigma_f^2}\tr(\Ktil^{-1}K) = \frac{N - \sigma^2\,T_1(\sigma^2)}{\sigma_f^2}.
+\end{equation}
+No separate Hutchinson call.
+
+\section{Algorithm}
+
+Let $\theta_1,\dots,\theta_{K-1}$ be the kernel hypers excluding $\sigma_f^2$. Setup: form $v_{\text{ker}}$ for $T$, $D$, all $\{D'_\theta\}$ via \texttt{spectral\_grad}, and a Jacobi preconditioner for $\Amean$.
+
+\begin{algorithm}[h]
+\caption{EFGP log-marginal gradient: one NUFFT, two CG calls.}
+\begin{algorithmic}[1]
+\State $z \leftarrow F^*y$ \Comment{\textbf{only NUFFT}}
+\State Solve $\Amean\,\beta_0 = D z$ by CG. \hfill\textbf{(CG \#1, mean)}
+\State $w \leftarrow T(D\beta_0)$ \Comment{Toeplitz mat-vec, reused below}
+\Statex\rule{\textwidth}{0.4pt}
+\State \emph{Term $T_2$ (all $M$-space):}
+\State \quad kernel hypers: $T_2(\theta_i) \leftarrow \langle\beta_0,\,(D'_{\theta_i}/|D|^2)\,\beta_0\rangle$
+\State \quad variance: $T_2(\sigma_f^2) \leftarrow \|\beta_0\|^2/\sigma_f^2$
+\State \quad noise: $T_2(\sigma^2) \leftarrow \sigma^{-4}\bigl(\|y\|^2 - 2\Re\{\beta_0^* D z\} + \beta_0^*\, D w\bigr)$
+\Statex\rule{\textwidth}{0.4pt}
+\State \emph{Term $T_1$:} draw $V\in\{\pm1\}^{T_p\times M}$, $V_n\in\{\pm1\}^{T_p\times M}$.
+\State \quad for each $\theta_i$: $u_i \leftarrow D'_{\theta_i}V$; $y_1^i \leftarrow T u_i$; $\mathrm{rhs}^i \leftarrow D y_1^i$
+\State \quad noise: $\mathrm{rhs}^n \leftarrow D\,T(D V_n)$
+\State \quad stack all RHSs; solve $\Amean X = \mathrm{rhs}$ by batched CG. \hfill\textbf{(CG \#2, trace)}
+\State \quad kernel: $y_2^i \leftarrow T(D X^i)$; $T_1(\theta_i) \leftarrow \sigma^{-2}\,\mathrm{mean}_k\langle (V)_k,\,(y_1^i - y_2^i)_k\rangle$
+\State \quad noise: $T_1(\sigma^2) \leftarrow \sigma^{-2}\bigl(N - \mathrm{mean}_k\langle (V_n)_k,\,(X^n)_k\rangle\bigr)$
+\State \quad variance: $T_1(\sigma_f^2) \leftarrow (N - \sigma^2 T_1(\sigma^2))/\sigma_f^2$
+\Statex\rule{\textwidth}{0.4pt}
+\State \textbf{Return} $\nabla_\theta\log p = \tfrac12\bigl(T_2 - T_1\bigr)$ for each hyper.
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Complexity.} Per gradient: one NUFFT ($\bigo(N + M\log M)$), two CG calls against $\Amean$ (mean: one RHS; trace: $K\,T_p$ RHSs), all $\bigo(M\log M)$ per mat-vec. Term $T_2$ is $\bigo(KM)$ total. No NUFFT inside the gradient loop.
+
+\paragraph{Why the $\beta_0$-form of $T_2$.} $T_2$ via $F^*\alpha = (F^*y - T(D\beta_0))/\sigma^2$ is algebraically identical to the $\beta_0$-form at CG convergence (eq.\,\eqref{eq:dfstar_alpha}), but at inexact CG it carries a $\|r\|^2/\sigma^4$ term that can flip the sign of $\nabla_{\sigma_f^2}$ when $\sigma^2$ shrinks. The $\beta_0$-form avoids this amplification.
+
+\end{document}

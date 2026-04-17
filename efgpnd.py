@@ -166,33 +166,27 @@ def efgpnd_gradient_batched(
             beta_raw = beta.detach().clone()
             beta.mul_(ws)
             # alpha is reconstructable from M-space ingredients via Woodbury;
-            # see scratch/bd_prime_trace.tex for the algebra.
+            # see scratch/gradient_derivation.tex for the algebra.
 
-        # 5)  Term‑2  (α*D'α, α*α) — purely M-space ---------------------------
+        # 5)  Term‑2 — purely M-space via β₀-path -----------------------------
         with record_function("5_compute_term2"):
-            # ||α||² via direct expansion of ||y - FDβ₀||²/σ⁴ — does NOT use
-            # the CG equation (robust to loose cg_tol / tiny σ²; the Woodbury-
-            # simplified form leaks β₀*·(DFy − Aβ₀)/σ⁴ in σ→0 regimes).
-            Tbeta = toeplitz(beta)
-            fadj_alpha = (Fy - Tbeta).div(sigmasq_eff)
-            y_norm2    = torch.dot(y, y)
-            c_scalar   = torch.vdot(beta_raw, ws * Fy).real       # Re{<β₀, D·Fy>}
-            beta_T_beta = torch.vdot(beta, Tbeta).real            # ||FDβ₀||² via T=F*F
-            alpha_norm = (y_norm2 - 2 * c_scalar + beta_T_beta) / (sigmasq_eff ** 2)
-            # generic D' path covers non-variance kernel hypers:
+            # At CG exactness D·F*α = β₀ entrywise, so F*α = β₀/D and
+            #   T_2(θ) = <F*α, D'_θ · F*α> = <β₀, (D'_θ/|D|²) · β₀>.
+            # The β₀-path is CG-robust: the F*α-path (via (F*y − T(Dβ₀))/σ²)
+            # amplifies the CG residual by 1/σ², which breaks T_2 in σ²→0
+            # regimes. Likewise ||α||² is expanded directly from ||y−FDβ₀||²/σ⁴
+            # rather than via the Woodbury identity, which would invoke
+            # A_mean β₀ = D·F*y exactly. See scratch/gradient_derivation.tex.
+            Tbeta       = toeplitz(beta)
+            y_norm2     = torch.dot(y, y)
+            c_scalar    = torch.vdot(beta_raw, ws * Fy).real       # Re{<β₀, D·F*y>}
+            beta_T_beta = torch.vdot(beta, Tbeta).real             # β₀* DTD β₀
+            alpha_norm  = (y_norm2 - 2 * c_scalar + beta_T_beta) / (sigmasq_eff ** 2)
+            ws2         = (ws.conj() * ws).real.clamp_min(torch.finfo(rdtype).tiny)
             term2_kernel = torch.stack([
-                torch.vdot(fadj_alpha, Dprime[:, i] * fadj_alpha).real
+                torch.vdot(beta_raw, (Dprime[:, i] / ws2) * beta_raw).real
                 for i in range(kernel_hyper_count)
             ])
-            # Variance: use ||β₀||²/σf². At CG exactness D·F*α = β₀, so
-            # T_2(σf²)·σf² = ||D·F*α||² = ||β₀||². Under inexact CG, ||β₀||²
-            # has error linear in the residual (vs quadratic for the D'-path,
-            # which amplifies by ||r||²/σ⁴ and breaks when σ² shrinks).
-            if variance_idx is not None:
-                variance_scalar = torch.as_tensor(
-                    kernel.get_hyper("variance"), device=device, dtype=rdtype,
-                )
-                term2_kernel[variance_idx] = torch.vdot(beta_raw, beta_raw).real / variance_scalar
             term2 = torch.cat((term2_kernel, alpha_norm.unsqueeze(0)))
 
         # 6)  Monte‑Carlo trace (Term‑1) — pure M-space (BD' Hutchinson) ------
