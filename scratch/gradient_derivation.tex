@@ -100,12 +100,18 @@ Woodbury on $\Ktil^{-1}$:
 \begin{equation}
   B = \sigma^{-2}\bigl(T - TD\,\Amean^{-1}\,DT\bigr).\label{eq:B}
 \end{equation}
-Hutchinson with Rademacher probes $V\in\{\pm1\}^{T_p\times M}$:
+For Rademacher probes $V\in\{\pm1\}^{T_p\times M}$, let $u_k^\theta := D'_\theta v_k$ and $X_k^\theta := \Amean^{-1}\,DTu_k^\theta$. Then $B\,D'_\theta v_k = \sigma^{-2}\bigl(Tu_k^\theta - TD\,X_k^\theta\bigr)$.
+
+\paragraph{$\beta$-form identity.} The defining equation $\Amean X_k^\theta = DTu_k^\theta$ expands as $\sigma^2 X_k^\theta + DTD\,X_k^\theta = DTu_k^\theta$, hence
 \begin{equation}
-  T_1(\theta)\approx \frac{1}{T_p}\sum_{k=1}^{T_p} v_k^*\,B\,D'_\theta\,v_k
-  \overset{\eqref{eq:B}}{=}\frac{1}{T_p}\sum_k v_k^*\,\sigma^{-2}\bigl(T u_k^\theta - TD\,\Amean^{-1}\,DTu_k^\theta\bigr),
+  D\bigl(Tu_k^\theta - TD\,X_k^\theta\bigr) = \sigma^2 X_k^\theta\quad\Longrightarrow\quad
+  \boxed{\;B\,D'_\theta v_k \;=\; X_k^\theta/D\;}\qquad\text{(at CG convergence)}.\label{eq:T1beta}
 \end{equation}
-where $u_k^\theta := D'_\theta v_k$. Each probe costs $2$ Toeplitz mat-vecs $+$ $1$ solve against $\Amean$; \textbf{no NUFFT}.
+So the Hutchinson estimator reduces to
+\begin{equation}
+  T_1(\theta) \;\approx\; \frac{1}{T_p}\sum_k \bigl\langle v_k,\; X_k^\theta/D\bigr\rangle,
+\end{equation}
+using only the CG output $X_k^\theta$ --- no $\sigma^{-2}$ subtraction. By the same argument as for $T_2$ (\S4), this swaps the $1/\sigma^2$ amplification of the residual-form for a simple division by $D$. Each probe costs $1$ solve against $\Amean$; \textbf{no Toeplitz beyond the rhs setup}, \textbf{no NUFFT}.
 
 \paragraph{Noise.} $\tr(\Ktil^{-1}) = \sigma^{-2}\bigl(N - \tr(\Amean^{-1}DTD)\bigr)$, estimated by Hutchinson on $\Amean^{-1}DTD$ (same batched CG).
 
@@ -132,10 +138,10 @@ Let $\theta_1,\dots,\theta_{K-1}$ be the kernel hypers excluding $\sigma_f^2$. S
 \State \quad noise: $T_2(\sigma^2) \leftarrow \sigma^{-4}\bigl(\|y\|^2 - 2\Re\{\beta_0^* D z\} + \beta_0^*\, D w\bigr)$
 \Statex\rule{\textwidth}{0.4pt}
 \State \emph{Term $T_1$:} draw $V\in\{\pm1\}^{T_p\times M}$, $V_n\in\{\pm1\}^{T_p\times M}$.
-\State \quad for each $\theta_i$: $u_i \leftarrow D'_{\theta_i}V$; $y_1^i \leftarrow T u_i$; $\mathrm{rhs}^i \leftarrow D y_1^i$
-\State \quad noise: $\mathrm{rhs}^n \leftarrow D\,T(D V_n)$
+\State \quad for each $\theta_i$: $\mathrm{rhs}^i \leftarrow D\,T\,(D'_{\theta_i} V)$
+\State \quad noise: $\mathrm{rhs}^n \leftarrow D\,T\,(D V_n)$
 \State \quad stack all RHSs; solve $\Amean X = \mathrm{rhs}$ by batched CG. \hfill\textbf{(CG \#2, trace)}
-\State \quad kernel: $y_2^i \leftarrow T(D X^i)$; $T_1(\theta_i) \leftarrow \sigma^{-2}\,\mathrm{mean}_k\langle (V)_k,\,(y_1^i - y_2^i)_k\rangle$
+\State \quad kernel ($\beta$-form): $T_1(\theta_i) \leftarrow \mathrm{mean}_k\bigl\langle (V)_k,\,(X^i)_k/D\bigr\rangle$
 \State \quad noise: $T_1(\sigma^2) \leftarrow \sigma^{-2}\bigl(N - \mathrm{mean}_k\langle (V_n)_k,\,(X^n)_k\rangle\bigr)$
 \State \quad variance: $T_1(\sigma_f^2) \leftarrow (N - \sigma^2 T_1(\sigma^2))/\sigma_f^2$
 \Statex\rule{\textwidth}{0.4pt}
@@ -145,6 +151,6 @@ Let $\theta_1,\dots,\theta_{K-1}$ be the kernel hypers excluding $\sigma_f^2$. S
 
 \paragraph{Complexity.} Per gradient: one NUFFT ($\bigo(N + M\log M)$), two CG calls against $\Amean$ (mean: one RHS; trace: $K\,T_p$ RHSs), all $\bigo(M\log M)$ per mat-vec. Term $T_2$ is $\bigo(KM)$ total. No NUFFT inside the gradient loop.
 
-\paragraph{Why the $\beta_0$-form of $T_2$.} $T_2$ via $F^*\alpha = (F^*y - T(D\beta_0))/\sigma^2$ is algebraically identical to the $\beta_0$-form at CG convergence (eq.\,\eqref{eq:dfstar_alpha}), but at inexact CG it carries a $\|r\|^2/\sigma^4$ term that can flip the sign of $\nabla_{\sigma_f^2}$ when $\sigma^2$ shrinks. The $\beta_0$-form avoids this amplification.
+\paragraph{Why the $\beta$-form everywhere.} Both $T_2$ and $T_1$ have the same structural choice: either take the CG output and divide by $D$ (the $\beta$-form, eq.\,\eqref{eq:dfstar_alpha},\,\eqref{eq:T1beta}), or Woodbury-reconstruct via $(F^*y - T(D\beta_0))/\sigma^2$ (for $T_2$) or $(Tu - TDX)/\sigma^2$ (for $T_1$). Both are algebraically identical at CG convergence. Under inexact CG with residual $\delta$, the Woodbury-reconstructed form carries a $1/\sigma^2$ prefactor that amplifies $\delta$. In $T_2$ this pre-amplified quantity sits on \emph{both sides} of a quadratic form, giving a $\|\delta\|^2/\sigma^4$ term that can flip the gradient sign. In $T_1$ it sits on one side of a linear inner product, giving only a $\|\delta\|/\sigma^2$ bias. The $\beta$-form avoids the $1/\sigma$ amplification in both cases; its residual scales by $1/D$ instead, which is bounded on the EFGP frequency grid.
 
 \end{document}
