@@ -23,6 +23,12 @@ def efgpnd_gradient_batched(
         mean_cg_init: Optional[torch.Tensor] = None,
         use_mean_cg_preconditioner: bool = True,
         use_trace_cg_preconditioner: bool = True,
+        mean_cg_preconditioner_type: str = "jacobi",
+        nystrom_rank: int = 30,
+        nystrom_oversample: int = 10,
+        nystrom_seed: int = 0,
+        frozen_grid: Optional[Tuple[torch.Tensor, float]] = None,
+        max_mtot_1d: Optional[int] = None,
         log_marginal_probes=100, log_marginal_steps=25):
     """
     Gradient of the N‑D GP log‑marginal likelihood estimated with
@@ -92,9 +98,26 @@ def efgpnd_gradient_batched(
         
         # Get frequency grid and weights
         with record_function("1_frequency_grid_setup"):
-            xis_1d, h, mtot = get_xis(kernel_obj=kernel, eps=eps, L=L, use_integral=True, l2scaled=False)#,trunc_eps=0.01)
-            grids = torch.meshgrid(*(xis_1d for _ in range(d)), indexing='ij') # makes tensor product Jm 
-            xis = torch.stack(grids, dim=-1).view(-1, d) 
+            if frozen_grid is not None:
+                xis_1d, h = frozen_grid
+                xis_1d = xis_1d.to(device=device, dtype=rdtype)
+                if torch.is_tensor(h):
+                    h = h.to(device=device, dtype=rdtype)
+                else:
+                    h = torch.tensor(h, device=device, dtype=rdtype)
+                mtot = xis_1d.numel()
+            else:
+                xis_1d, h, mtot = get_xis(kernel_obj=kernel, eps=eps, L=L, use_integral=True, l2scaled=False)#,trunc_eps=0.01)
+                if max_mtot_1d is not None and mtot > max_mtot_1d:
+                    # Cap mtot_1d: keep central (2*half+1) nodes, drop spectral tails.
+                    half = max_mtot_1d // 2
+                    center = mtot // 2
+                    keep_lo = center - half
+                    keep_hi = keep_lo + (2 * half + 1)
+                    xis_1d = xis_1d[keep_lo:keep_hi]
+                    mtot = xis_1d.numel()
+            grids = torch.meshgrid(*(xis_1d for _ in range(d)), indexing='ij') # makes tensor product Jm
+            xis = torch.stack(grids, dim=-1).view(-1, d)
             ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=cdtype) * h**d) # (mtot**d,1)
             Dprime  = (h**d * kernel.spectral_grad(xis)).to(cmplx)  # (M, 3)
             # print(xis.shape)
@@ -118,15 +141,32 @@ def efgpnd_gradient_batched(
         with record_function("3_toeplitz_setup"):
             m_conv = (mtot - 1) // 2
             v_kernel = compute_convolution_vector_vectorized_dD(m_conv, x, h).to(dtype=cdtype)
-            toeplitz = ToeplitzND(v_kernel, force_pow2=True)               # cached once
+            toeplitz = ToeplitzND(v_kernel, force_pow2=False)               # cached once
 
             # 3)  Linear map A· = D F*F (D·) + σ² I -------------------------------
             A_apply = create_A_mean(ws, toeplitz, sigmasq_eff, cdtype)
             center = tuple(((torch.tensor(v_kernel.shape, device=device) - 1) // 2).tolist())
             diag_scale = v_kernel[center].real
-            jacobi_M_inv = create_jacobi_precond(ws, sigmasq_eff, diag_scale=diag_scale)
-            mean_M_inv = jacobi_M_inv if use_mean_cg_preconditioner else None
-            trace_M_inv = jacobi_M_inv if use_trace_cg_preconditioner else None
+            if mean_cg_preconditioner_type == "nystrom":
+                shared_M_inv = create_nystrom_precond(
+                    A_apply, M=ws.numel(), sigmasq_scalar=sigmasq_eff,
+                    rank=nystrom_rank, oversample=nystrom_oversample,
+                    seed=nystrom_seed, device=device, cdtype=cdtype, rdtype=rdtype,
+                )
+            elif mean_cg_preconditioner_type == "jacobi":
+                shared_M_inv = create_jacobi_precond(ws, sigmasq_eff, diag_scale=diag_scale)
+            elif mean_cg_preconditioner_type == "kronecker":
+                shared_M_inv = create_kronecker_precond(
+                    ws, v_kernel, sigmasq_eff, d=d, mtot_1d=mtot,
+                    device=device, cdtype=cdtype, rdtype=rdtype,
+                )
+            else:
+                raise ValueError(
+                    f"unknown mean_cg_preconditioner_type={mean_cg_preconditioner_type!r}; "
+                    "expected 'jacobi', 'kronecker', or 'nystrom'"
+                )
+            mean_M_inv = shared_M_inv if use_mean_cg_preconditioner else None
+            trace_M_inv = shared_M_inv if use_trace_cg_preconditioner else None
 
         # 4)  Solve A β = W F* y ---------------------------------------------
         with record_function("4_solve_cg"):
@@ -147,7 +187,7 @@ def efgpnd_gradient_batched(
             beta_raw = beta.detach().clone()
             beta.mul_(ws)
             # alpha is reconstructable from M-space ingredients via Woodbury;
-            # see scratch/bd_prime_trace.tex for the algebra.
+            # see scratch/gradient_derivation.tex for the algebra.
 
         # 5)  Term‑2 — purely M-space via β₀-path -----------------------------
         with record_function("5_compute_term2"):
@@ -157,7 +197,7 @@ def efgpnd_gradient_batched(
             # amplifies the CG residual by 1/σ², which breaks T_2 in σ²→0
             # regimes. Likewise ||α||² is expanded directly from ||y−FDβ₀||²/σ⁴
             # rather than via the Woodbury identity, which would invoke
-            # A_mean β₀ = D·F*y exactly. See scratch/bd_prime_trace.tex.
+            # A_mean β₀ = D·F*y exactly. See scratch/gradient_derivation.tex.
             Tbeta       = toeplitz(beta)
             y_norm2     = torch.dot(y, y)
             c_scalar    = torch.vdot(beta_raw, ws * Fy).real       # Re{<β₀, D·F*y>}
@@ -371,6 +411,7 @@ class EFGPND(nn.Module):
         nufft_eps: float = 1e-4,
         opts: Optional[Dict] = None,
         estimate_params: bool = True,
+        param_transform: str = "softplus",
     ):
         """
         Equispaced‑Fourier Gaussian Process (EFGP) regression in d dimensions.
@@ -386,6 +427,7 @@ class EFGPND(nn.Module):
         opts        : dictionary of options for auxiliary methods
                     (e.g., `max_cg_iter` for CG solver)
         estimate_params : whether to initialize lengthscales and noise by MLE
+        param_transform : "softplus" (default, matches GPyTorch) or "exp" (legacy)
         """
         super().__init__()
         self.x = x
@@ -451,7 +493,8 @@ class EFGPND(nn.Module):
             # Temporarily set default dtype to match input data
             torch.set_default_dtype(x.dtype)
             # Create GP parameters - these will now use the input data's dtype
-            self._gp_params = GPParams(kernel=kernel, init_sig2=(sigmasq or 0.1))
+            self._gp_params = GPParams(kernel=kernel, init_sig2=(sigmasq or 0.1),
+                                       transform=param_transform)
             # Register parameters
             self.register_parameter("gp_params", self._gp_params.raw)
             # Ensure the kernel has a reference to GPParams (this is also done in GPParams.__init__)
@@ -588,6 +631,8 @@ class EFGPND(nn.Module):
         log_marginal_probes: int = 100,
         log_marginal_steps: int = 25,
         verbose: bool = False,
+        frozen_grid: Optional[Tuple[torch.Tensor, float]] = None,
+        max_mtot_1d: Optional[int] = None,
         **kwargs
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -644,6 +689,10 @@ class EFGPND(nn.Module):
         use_mean_cg_warm_start = self.opts.get("mean_cg_warm_start", True)
         use_mean_cg_preconditioner = self.opts.get("mean_cg_preconditioner", True)
         use_trace_cg_preconditioner = self.opts.get("trace_cg_preconditioner", True)
+        mean_cg_preconditioner_type = self.opts.get("mean_cg_preconditioner_type", "jacobi")
+        nystrom_rank = self.opts.get("nystrom_rank", 30)
+        nystrom_oversample = self.opts.get("nystrom_oversample", 10)
+        nystrom_seed = self.opts.get("nystrom_seed", 0)
         
         # Calculate data bounds for gradient computation
         x0 = self.x.min(dim=0).values
@@ -673,6 +722,12 @@ class EFGPND(nn.Module):
             mean_cg_init=self._last_gradient_beta if use_mean_cg_warm_start else None,
             use_mean_cg_preconditioner=use_mean_cg_preconditioner,
             use_trace_cg_preconditioner=use_trace_cg_preconditioner,
+            mean_cg_preconditioner_type=mean_cg_preconditioner_type,
+            nystrom_rank=nystrom_rank,
+            nystrom_oversample=nystrom_oversample,
+            nystrom_seed=nystrom_seed,
+            frozen_grid=frozen_grid,
+            max_mtot_1d=max_mtot_1d,
             **log_marginal_kwargs,
             **kwargs
         )
@@ -691,12 +746,12 @@ class EFGPND(nn.Module):
         if grads.ndim == 0:
             grads = grads.unsqueeze(0)  # Convert scalar to 1D tensor
         
-        # Transform to raw space gradient via chain rule
-        pos_vec = self._gp_params.pos.to(device=self.device)
-        # Make sure the gradient has the same dtype as the model parameters
+        # Transform to raw space gradient via chain rule: d(NLL)/d(raw) = d(NLL)/d(pos) * d(pos)/d(raw)
+        jacobian = self._gp_params.raw_jacobian().detach().to(device=self.device)
         param_dtype = self._gp_params.raw.dtype
+        n = self.x.shape[0]
         raw_grad = torch.stack([
-            grads[i].detach().to(device=self.device, dtype=param_dtype) * pos_vec[i]
+            grads[i].detach().to(device=self.device, dtype=param_dtype) * jacobian[i] / n
             for i in range(len(grads))
         ], dim=0)
         
@@ -793,7 +848,7 @@ class EFGPND(nn.Module):
         # Setup Toeplitz operator
         m_conv = (mtot - 1) // 2
         v_kernel = compute_convolution_vector_vectorized_dD(m_conv, x, h).to(dtype=cdtype)
-        toeplitz = ToeplitzND(v_kernel, force_pow2=True)
+        toeplitz = ToeplitzND(v_kernel, force_pow2=False)
         
         # Create A_mean operator directly using the new function
         A_mean = create_A_mean(ws, toeplitz, sigmasq_scalar, cdtype)
@@ -801,7 +856,27 @@ class EFGPND(nn.Module):
         diag_scale = v_kernel[center].real
         mean_M_inv = None
         if self.opts.get("mean_cg_preconditioner", True):
-            mean_M_inv = create_jacobi_precond(ws, sigmasq_scalar, diag_scale=diag_scale)
+            precond_type = self.opts.get("mean_cg_preconditioner_type", "jacobi")
+            if precond_type == "nystrom":
+                mean_M_inv = create_nystrom_precond(
+                    A_mean, M=ws.numel(), sigmasq_scalar=sigmasq_scalar,
+                    rank=self.opts.get("nystrom_rank", 30),
+                    oversample=self.opts.get("nystrom_oversample", 10),
+                    seed=self.opts.get("nystrom_seed", 0),
+                    device=device, cdtype=cdtype, rdtype=rdtype,
+                )
+            elif precond_type == "jacobi":
+                mean_M_inv = create_jacobi_precond(ws, sigmasq_scalar, diag_scale=diag_scale)
+            elif precond_type == "kronecker":
+                mean_M_inv = create_kronecker_precond(
+                    ws, v_kernel, sigmasq_scalar, d=d, mtot_1d=mtot,
+                    device=device, cdtype=cdtype, rdtype=rdtype,
+                )
+            else:
+                raise ValueError(
+                    f"unknown mean_cg_preconditioner_type={precond_type!r}; "
+                    "expected 'jacobi', 'kronecker', or 'nystrom'"
+                )
     
         # Solve CG system for mean
         cg_tol = self.opts.get("cg_tolerance", 1e-4)
@@ -1083,6 +1158,10 @@ class EFGPND(nn.Module):
         compute_log_marginal: bool = False,   # Whether to compute log marginal likelihood
         verbose: bool = False,                # Print detailed information (changed to default True to help debug)
         trace_samples: int = 10,             # Number of trace samples to use
+        freeze_quad_grid: bool = False,       # If True, compute quadrature grid once at init and reuse throughout training
+        frozen_grid: Optional[Tuple[torch.Tensor, float]] = None,  # Pre-built (xis_1d, h); overrides freeze_quad_grid
+        max_mtot_1d: Optional[int] = None,    # Explicit cap on per-dim grid size
+        ls_design: Optional[float] = None,    # Derive max_mtot_1d from get_xis(ls=ls_design, eps=self.eps)
 
         **gkwargs,                             # forwarded to compute_gradients
     ):
@@ -1136,6 +1215,32 @@ class EFGPND(nn.Module):
         
         history['sigmasq'] = [float(self.sigmasq.item())]
         
+        # Derive max_mtot_1d from ls_design if provided
+        if ls_design is not None and max_mtot_1d is None:
+            L_val = torch.max(torch.max(self.x, dim=0).values - torch.min(self.x, dim=0).values)
+            L_val = float(L_val) if float(L_val) > 1e-9 else 1.0
+            from copy import deepcopy
+            ker_design = deepcopy(self.kernel)
+            ker_design.set_hyper('lengthscale', float(ls_design))
+            _, _, max_mtot_1d = get_xis(
+                kernel_obj=ker_design, eps=self.eps, L=L_val,
+                use_integral=True, l2scaled=False,
+            )
+            print(f"max_mtot_1d = {max_mtot_1d} (from ls_design={ls_design:g}, eps={self.eps:g})")
+
+        # Build frozen quadrature grid if requested
+        if frozen_grid is None and freeze_quad_grid:
+            L_val = torch.max(torch.max(self.x, dim=0).values - torch.min(self.x, dim=0).values)
+            L_val = float(L_val) if float(L_val) > 1e-9 else 1.0
+            xis_1d_frozen, h_frozen, mtot_frozen = get_xis(
+                kernel_obj=self.kernel, eps=self.eps, L=L_val,
+                use_integral=True, l2scaled=False,
+            )
+            frozen_grid = (xis_1d_frozen.to(device=device, dtype=rdtype), float(h_frozen))
+            print(f"Frozen quadrature grid: mtot_1d={mtot_frozen}, h={h_frozen:.6g} (built from eps={self.eps:g} at init hypers)")
+        elif frozen_grid is not None:
+            print(f"Using user-supplied frozen grid: mtot_1d={frozen_grid[0].numel()}, h={float(frozen_grid[1]):.6g}")
+
         start_time = time.time()
         print(f"Optimizing hyperparameters using {optimizer if isinstance(optimizer, str) else optimizer.__class__.__name__}")
 
@@ -1164,6 +1269,8 @@ class EFGPND(nn.Module):
                     apply_gradients=True,  # Apply gradients directly
                     compute_log_marginal=True,
                     verbose=verbose,
+                    frozen_grid=frozen_grid,
+                    max_mtot_1d=max_mtot_1d,
                     **gkwargs
                 )
                 history['log_marginal'].append(float(log_marginal.item() if isinstance(log_marginal, torch.Tensor) else log_marginal))
@@ -1174,6 +1281,8 @@ class EFGPND(nn.Module):
                     apply_gradients=True,  # Apply gradients directly
                     compute_log_marginal=False,
                     verbose=verbose,
+                    frozen_grid=frozen_grid,
+                    max_mtot_1d=max_mtot_1d,
                     **gkwargs
                 )
             
@@ -1246,13 +1355,15 @@ class ToeplitzND:
     ToeplitzND class for multidimensional Toeplitz matrix-vector products using FFTs.
     """
     
-    def __init__(self, v: torch.Tensor, *, force_pow2: bool = True, precompute_fft: bool = True):
+    def __init__(self, v: torch.Tensor, *, force_pow2: bool = False, precompute_fft: bool = True):
         """
         Initialize the Toeplitz operator with the first column/row vector.
-        
+
         Args:
             v: First column/row of the Toeplitz matrix, zero-padded to full convolution size
-            force_pow2: If True, use power of 2 for FFT sizes (default: True)
+            force_pow2: If True, pad FFT sizes to the next power of 2. Default False,
+                which uses the next {2,3,5,7}-smooth size — benchmarked 2-13× faster
+                for typical M in d=2,3 (see scratch/bench_toeplitz_apply.py).
             precompute_fft: If True, precompute and store the FFT of v (default: True)
         """
         # Ensure complex
@@ -1634,6 +1745,213 @@ def create_jacobi_precond(ws, sigmasq_scalar, diag_scale=1.0):
         # v has shape (..., M); we divide elementwise along the last dim
         return v / diag_elements
     return M_inv
+
+
+def create_nystrom_precond(A_apply, M, sigmasq_scalar, rank=30, oversample=10,
+                           seed=0, device=None, cdtype=torch.complex128,
+                           rdtype=torch.float64):
+    """
+    Randomized Nyström preconditioner for A_mean = D T D + sigma^2 I.
+
+    Algorithm (Frangella-Tropp-Udell, SIMAX 2023, stabilized variant):
+      1. Sketch A with Gaussian test matrix Omega (size M x (rank+oversample)).
+      2. Y = A @ Omega; apply small regularizing shift for Cholesky stability.
+      3. B = Y (Omega^T Y)^{-1/2} via Cholesky; SVD gives (U, Sigma).
+      4. Lambda = Sigma^2 - shift, truncated to top-`rank`.
+    Preconditioner:
+        P = U diag(Lambda) U^T + mu (I - U U^T),   mu = sigmasq_scalar
+    Apply:
+        P^{-1} r = U diag(1/Lambda) U^T r + (1/mu) (r - U U^T r)
+    Cost: setup = (rank + oversample) full A-matvecs; apply = O(M * rank).
+
+    Works well when A has a clear top-k eigenvalue gap (clustered / highly
+    non-uniform sampling geometry).  For uniform-ish sampling Jacobi is
+    usually faster since A's spectrum decays smoothly and no rank is enough.
+    """
+    r = rank + oversample
+    if r >= M:
+        # Degenerate: fall back to Jacobi-equivalent (no compression possible).
+        r = max(1, M - 1)
+
+    gen = torch.Generator(device="cpu").manual_seed(int(seed))
+    Omega = (torch.randn(M, r, generator=gen, dtype=rdtype)
+             + 1j * torch.randn(M, r, generator=gen, dtype=rdtype)).to(cdtype) / math.sqrt(2.0)
+    if device is not None:
+        Omega = Omega.to(device)
+    Omega, _ = torch.linalg.qr(Omega, mode="reduced")
+
+    Y = torch.empty(M, r, dtype=cdtype, device=Omega.device)
+    for j in range(r):
+        Y[:, j] = A_apply(Omega[:, j])
+
+    nu = (torch.finfo(rdtype).eps ** 0.5) * torch.linalg.norm(Y).real
+    Y_nu = Y + nu * Omega
+    C = Omega.conj().T @ Y_nu
+    C = 0.5 * (C + C.conj().T)
+    L = torch.linalg.cholesky(C)
+    B = torch.linalg.solve_triangular(L, Y_nu.conj().T, upper=False).conj().T
+    U, S, _ = torch.linalg.svd(B, full_matrices=False)
+    Lam = (S.pow(2) - nu).clamp_min(0.0)
+
+    k_eff = min(rank, U.shape[1])
+    U_hat = U[:, :k_eff].contiguous()
+    Lam_hat = Lam[:k_eff].to(rdtype)
+
+    Lam_inv = (1.0 / Lam_hat.clamp_min(torch.finfo(rdtype).tiny)).to(cdtype)
+    mu = float(sigmasq_scalar.item()) if torch.is_tensor(sigmasq_scalar) else float(sigmasq_scalar)
+    mu_inv = 1.0 / max(mu, torch.finfo(rdtype).tiny)
+
+    def M_inv(v):
+        # v: (..., M)
+        is_batch = v.ndim > 1
+        if is_batch:
+            Uh_r = v @ U_hat.conj()                                   # (B, k)
+            on_sub = (Lam_inv * Uh_r) @ U_hat.conj().T                # (B, M)
+            off_sub = mu_inv * (v - Uh_r @ U_hat.conj().T)
+            return on_sub + off_sub
+        else:
+            Uh_r = U_hat.conj().T @ v                                 # (k,)
+            on_sub = U_hat @ (Lam_inv * Uh_r)                         # (M,)
+            off_sub = mu_inv * (v - U_hat @ Uh_r)
+            return on_sub + off_sub
+
+    return M_inv
+
+
+def create_kronecker_precond(ws, v_kernel, sigmasq_scalar, d, mtot_1d,
+                             device=None, cdtype=torch.complex128,
+                             rdtype=torch.float64):
+    """
+    Kronecker preconditioner for A_mean = D T D + sigma^2 I.
+
+    Builds M^{-1} that is EXACT for A = (⊗_k H_k) + sigma^2 I, where
+    H_k = D_k T_k D_k with
+      - D_k : 1D spectral factor of D=diag(ws) under a rank-1 separation
+              (exact for product kernels: SE, product-Matérn);
+      - T_k : 1D Toeplitz extracted as the slice of v_kernel along axis k
+              with all other axes pinned at the origin (k_j = 0, j != k).
+
+    The preconditioner is therefore EXACT when:
+      (i)  the kernel has a separable spectral density (ws factorises); AND
+      (ii) the data Toeplitz T is separable (holds for tensor-grid data,
+           degrades gracefully for well-spread data).
+
+    Setup cost:  d dense m×m Hermitian eigendecompositions  (O(d * m^3))
+    Apply cost:  2d mode-k dense mat-vecs, O(d * M * m) per apply
+                 (compare: one FFT-based A_mean apply is O(M log m)).
+
+    Parameters
+    ----------
+    ws            : (M,) complex, spectral weights on the tensor grid.
+    v_kernel      : (L,)*d complex, the precomputed convolution vector.
+    sigmasq_scalar: scalar noise variance (tensor or python float).
+    d             : int, spatial dimension.
+    mtot_1d       : int, 1D frequency-grid size (so M = mtot_1d ** d).
+
+    Returns
+    -------
+    M_inv(v) : callable applying the preconditioner to (M,) or (B, M).
+    """
+    m = int(mtot_1d)
+    M_total = m ** d
+    assert ws.numel() == M_total, f"ws size {ws.numel()} != m^d = {M_total}"
+    if device is None:
+        device = ws.device
+
+    if torch.is_tensor(sigmasq_scalar):
+        sigsq = float(sigmasq_scalar.detach().real.item())
+    else:
+        sigsq = float(sigmasq_scalar)
+
+    # --- 1D factorisation of ws: ws[i1,...,id] = ∏_k D_k[i_k] (exact for product kernels)
+    ws_nd = ws.view(*(m,) * d).to(cdtype)
+    ctr_ws = m // 2  # origin index along each axis (mtot_1d is odd for symmetric grids)
+    idx_ws_ctr = (ctr_ws,) * d
+    ws_ctr = ws_nd[idx_ws_ctr]
+    # Guard against zero center (shouldn't happen for well-posed spectral densities)
+    if ws_ctr.abs().item() == 0.0:
+        ws_ctr = ws_ctr + torch.finfo(rdtype).tiny
+    norm = ws_ctr ** ((d - 1) / d)   # complex fractional power; fine for real-positive ws
+    Ds = []
+    for k in range(d):
+        slc = [ctr_ws] * d
+        slc[k] = slice(None)
+        D_k = (ws_nd[tuple(slc)] / norm).to(cdtype)
+        Ds.append(D_k)
+
+    # --- Extract 1D convolution vectors from v_kernel (length L = 2m-1 for odd m)
+    v_shape = v_kernel.shape
+    if any(s != v_shape[0] for s in v_shape):
+        raise ValueError(f"Expected isotropic v_kernel shape, got {v_shape}")
+    L = v_shape[0]
+    ctr_v = (L - 1) // 2
+    # This is the offset s.t. v_1d[ctr_v] corresponds to k_k = 0.
+
+    # Normalise the 1D v-slices so that ⊗_k T_k reproduces T on the origin
+    # (i.e. T[0,...,0] = ∏_k T_k[0,0]).  Without this, each T_k carries an
+    # extra factor of v[0]^{(d-1)/d}, which breaks the Kronecker identity on
+    # separable data.
+    v_ctr_val = v_kernel[(ctr_v,) * d].to(cdtype)
+    if v_ctr_val.abs().item() == 0.0:
+        v_ctr_val = v_ctr_val + torch.finfo(rdtype).tiny
+    v_norm = v_ctr_val ** ((d - 1) / d)
+
+    Vs = []
+    Lams = []
+    for k in range(d):
+        slc = [ctr_v] * d
+        slc[k] = slice(None)
+        v_1d = (v_kernel[tuple(slc)].to(cdtype)) / v_norm  # (L,)
+        # Build 1D Toeplitz of size m×m with T_k[a,b] = v_1d[(a-b) + ctr_v].
+        a = torch.arange(m, device=device)
+        T_k = v_1d[(a[:, None] - a[None, :]) + ctr_v]
+        # H_k = D_k T_k D_k (Hermitian PSD up to approximation/round-off)
+        H_k = Ds[k][:, None] * T_k * Ds[k][None, :]
+        H_k = 0.5 * (H_k + H_k.conj().T)
+        Lam_k, V_k = torch.linalg.eigh(H_k)
+        Lams.append(Lam_k.to(rdtype).clamp_min(0.0))
+        Vs.append(V_k.to(cdtype))
+
+    # --- Build diagonal in Kronecker eigen-basis: (∏_k Λ_k(i_k)) + σ²
+    lam_prod = torch.ones(*(m,) * d, device=device, dtype=rdtype)
+    for k in range(d):
+        shape = [1] * d
+        shape[k] = m
+        lam_prod = lam_prod * Lams[k].view(shape)
+    diag_inv = (1.0 / (lam_prod + sigsq)).to(cdtype)
+
+    # --- Apply M^{-1}: (⊗V_k) diag^{-1} (⊗V_k^H)
+    def _apply_kron(t, mats, hermitian):
+        """Apply ⊗_k mats[k] (or Hermitian-conjugate transpose) on the last d axes of t."""
+        nd = t.ndim
+        for k in range(d):
+            ax = nd - d + k
+            t = torch.movedim(t, ax, -1)
+            # y = A x with x along last axis is: y = x @ A.T, since (Ax)_i = Σ_j x_j A_ji = (x @ A.T)_i
+            #   A^H x along last axis: y = x @ conj(A)
+            if hermitian:
+                t = t @ mats[k].conj()        # V_k^H
+            else:
+                t = t @ mats[k].transpose(-1, -2)  # V_k
+            t = torch.movedim(t, -1, ax)
+        return t
+
+    def M_inv(v):
+        is_batch = v.ndim > 1
+        if is_batch:
+            B = v.shape[0]
+            t = v.to(cdtype).reshape(B, *(m,) * d)
+        else:
+            t = v.to(cdtype).reshape(*(m,) * d)
+        t = _apply_kron(t, Vs, hermitian=True)
+        t = t * diag_inv
+        t = _apply_kron(t, Vs, hermitian=False)
+        if is_batch:
+            return t.reshape(B, -1)
+        return t.reshape(-1)
+
+    return M_inv
+
 
 # for stochastic variance estimation
 def diag_sums_nd(A_apply, J, xis_flat, max_cg_iter, cg_tol, ws):
