@@ -23,7 +23,7 @@ def efgpnd_gradient_batched(
         mean_cg_init: Optional[torch.Tensor] = None,
         use_mean_cg_preconditioner: bool = True,
         use_trace_cg_preconditioner: bool = True,
-        mean_cg_preconditioner_type: str = "jacobi",
+        mean_cg_preconditioner_type: str = "kronecker",
         nystrom_rank: int = 30,
         nystrom_oversample: int = 10,
         nystrom_seed: int = 0,
@@ -689,7 +689,7 @@ class EFGPND(nn.Module):
         use_mean_cg_warm_start = self.opts.get("mean_cg_warm_start", True)
         use_mean_cg_preconditioner = self.opts.get("mean_cg_preconditioner", True)
         use_trace_cg_preconditioner = self.opts.get("trace_cg_preconditioner", True)
-        mean_cg_preconditioner_type = self.opts.get("mean_cg_preconditioner_type", "jacobi")
+        mean_cg_preconditioner_type = self.opts.get("mean_cg_preconditioner_type", "kronecker")
         nystrom_rank = self.opts.get("nystrom_rank", 30)
         nystrom_oversample = self.opts.get("nystrom_oversample", 10)
         nystrom_seed = self.opts.get("nystrom_seed", 0)
@@ -856,7 +856,7 @@ class EFGPND(nn.Module):
         diag_scale = v_kernel[center].real
         mean_M_inv = None
         if self.opts.get("mean_cg_preconditioner", True):
-            precond_type = self.opts.get("mean_cg_preconditioner_type", "jacobi")
+            precond_type = self.opts.get("mean_cg_preconditioner_type", "kronecker")
             if precond_type == "nystrom":
                 mean_M_inv = create_nystrom_precond(
                     A_mean, M=ws.numel(), sigmasq_scalar=sigmasq_scalar,
