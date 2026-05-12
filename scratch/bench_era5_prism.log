@@ -1,0 +1,21 @@
+ERA5 + PRISM benchmark, eps=1e-3, cg_tol=1e-4, K=3 + 1 warmup
+
+Loading ERA5...
+  N=1,038,240 in 0.3s
+
+=== ERA5 t2m: N=1,038,240, d=2 ===
+  ℓ=0.02   M=6561 (m=81, N/m²=158.2)
+    kron  : 0.15s, cg=2  jacobi: 0.27s, cg=24  -> KRON (1.88x)
+  ℓ=0.01   M=25281 (m=159, N/m²=41.1)
+    kron  : 0.26s, cg=2  jacobi: 0.61s, cg=21  -> KRON (2.38x)
+
+Loading PRISM (sub 1M)...
+  N=1,000,000 in 1.5s
+
+=== PRISM tmean (sub 1M): N=1,000,000, d=2 ===
+  ℓ=0.02   M=6561 (m=81, N/m²=152.4)
+    kron  : 1.04s, cg=150  jacobi: 0.35s, cg=48  -> JAC  (0.34x)
+  ℓ=0.01   M=25281 (m=159, N/m²=39.6)
+    kron  : 4.41s, cg=215  jacobi: 0.97s, cg=49  -> JAC  (0.22x)
+
+wrote -> /Users/colecitrenbaum/Documents/GPs/gp-quadrature/scratch/bench_era5_prism.json

@@ -1,0 +1,80 @@
+SVD-circulant preconditioner (Idea 3)
+
+
+=== Uniform [0,1]^2 (product): N=50,000, d=2 ===
+
+  (ℓ=0.05, σ_f²=1.0, σ²=0.01)
+    Jacobi                : 0.07s  mean-cg=3, trace-cg=62  M=1225
+    plain Kron            : 0.07s  mean-cg=1, trace-cg=7
+    SVDcirc(R=1 )        : 0.16s  mean-cg=1, trace-cg=274
+    SVDcirc(R=2 )        : 0.15s  mean-cg=1, trace-cg=265
+    SVDcirc(R=4 )        : 0.17s  mean-cg=1, trace-cg=272
+    SVDcirc(R=8 )        : 0.17s  mean-cg=2, trace-cg=264
+    SoK-exact(R=1 )      : 0.07s  mean-cg=1, trace-cg=9
+    SoK-exact(R=2 )      : 0.40s  mean-cg=2, trace-cg=246
+    SoK-exact(R=4 )      : 0.53s  mean-cg=1, trace-cg=233
+    SoK-exact(R=8 )      : 0.83s  mean-cg=4, trace-cg=231
+
+  (ℓ=0.02, σ_f²=1.0, σ²=0.01)
+    Jacobi                : 0.21s  mean-cg=1, trace-cg=69  M=6561
+    plain Kron            : 0.10s  mean-cg=1, trace-cg=13
+    SVDcirc(R=1 )        : 0.58s  mean-cg=1, trace-cg=208
+    SVDcirc(R=2 )        : 0.94s  mean-cg=1, trace-cg=211
+    SVDcirc(R=4 )        : 0.74s  mean-cg=1, trace-cg=207
+    SVDcirc(R=8 )        : 1.20s  mean-cg=1, trace-cg=207
+    SoK-exact(R=1 )      : 0.82s  mean-cg=1, trace-cg=199
+    SoK-exact(R=2 )      : 1.98s  mean-cg=1, trace-cg=200
+    SoK-exact(R=4 )      : 2.69s  mean-cg=1, trace-cg=193
+    SoK-exact(R=8 )      : 3.48s  mean-cg=1, trace-cg=189
+
+=== Uniform disk (non-product): N=50,000, d=2 ===
+
+  (ℓ=0.05, σ_f²=1.0, σ²=0.01)
+    Jacobi                : 0.12s  mean-cg=3, trace-cg=56  M=1225
+    plain Kron            : 0.11s  mean-cg=1, trace-cg=73
+    SVDcirc(R=1 )        : 0.17s  mean-cg=1, trace-cg=308
+    SVDcirc(R=2 )        : 0.16s  mean-cg=4, trace-cg=295
+    SVDcirc(R=4 )        : 0.28s  mean-cg=1, trace-cg=525
+    SVDcirc(R=8 )        : 0.22s  mean-cg=1, trace-cg=428
+    SoK-exact(R=1 )      : 0.25s  mean-cg=7, trace-cg=243
+    SoK-exact(R=2 )      : 0.38s  mean-cg=1, trace-cg=282
+    SoK-exact(R=4 )      : 0.56s  mean-cg=4, trace-cg=243
+    SoK-exact(R=8 )      : 0.98s  mean-cg=6, trace-cg=252
+
+  (ℓ=0.02, σ_f²=1.0, σ²=0.01)
+    Jacobi                : 0.15s  mean-cg=1, trace-cg=66  M=6561
+    plain Kron            : 0.50s  mean-cg=1, trace-cg=97
+    SVDcirc(R=1 )        : 0.74s  mean-cg=1, trace-cg=307
+    SVDcirc(R=2 )        : 0.72s  mean-cg=1, trace-cg=268
+    SVDcirc(R=4 )        : 0.61s  mean-cg=1, trace-cg=239
+    SVDcirc(R=8 )        : 0.57s  mean-cg=1, trace-cg=225
+    SoK-exact(R=1 )      : 0.37s  mean-cg=1, trace-cg=93
+    SoK-exact(R=2 )      : 4.16s  mean-cg=1, trace-cg=890
+    SoK-exact(R=4 )      : 2.74s  mean-cg=1, trace-cg=381
+    SoK-exact(R=8 )      : 3.94s  mean-cg=1, trace-cg=200
+
+=== Uniform annulus (non-product): N=50,000, d=2 ===
+
+  (ℓ=0.05, σ_f²=1.0, σ²=0.01)
+    Jacobi                : 0.14s  mean-cg=1, trace-cg=74  M=1225
+    plain Kron            : 0.18s  mean-cg=1, trace-cg=101
+    SVDcirc(R=1 )        : 0.32s  mean-cg=1, trace-cg=312
+    SVDcirc(R=2 )        : 0.44s  mean-cg=1, trace-cg=294
+    SVDcirc(R=4 )        : 0.45s  mean-cg=1, trace-cg=526
+    SVDcirc(R=8 )        : 0.43s  mean-cg=1, trace-cg=469
+    SoK-exact(R=1 )      : 0.41s  mean-cg=6, trace-cg=258
+    SoK-exact(R=2 )      : 0.62s  mean-cg=17, trace-cg=254
+    SoK-exact(R=4 )      : 1.08s  mean-cg=6, trace-cg=238
+    SoK-exact(R=8 )      : 1.82s  mean-cg=8, trace-cg=221
+
+  (ℓ=0.02, σ_f²=1.0, σ²=0.01)
+    Jacobi                : 0.93s  mean-cg=1, trace-cg=74  M=6561
+    plain Kron            : 1.27s  mean-cg=1, trace-cg=124
+    SVDcirc(R=1 )        : 2.76s  mean-cg=1, trace-cg=350
+    SVDcirc(R=2 )        : 1.60s  mean-cg=1, trace-cg=246
+    SVDcirc(R=4 )        : 1.49s  mean-cg=1, trace-cg=240
+    SVDcirc(R=8 )        : 1.57s  mean-cg=1, trace-cg=244
+    SoK-exact(R=1 )      : 1.11s  mean-cg=1, trace-cg=125
+    SoK-exact(R=2 )      : 3.07s  mean-cg=1, trace-cg=398
+    SoK-exact(R=4 )      : 1.55s  mean-cg=1, trace-cg=195
+    SoK-exact(R=8 )      : 2.39s  mean-cg=1, trace-cg=194

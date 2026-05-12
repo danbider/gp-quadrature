@@ -1,0 +1,68 @@
+SVD-circulant preconditioner (Idea 3)
+
+
+=== Uniform [0,1]^2 (product): N=50,000, d=2 ===
+
+  (ℓ=0.05, σ_f²=1.0, σ²=0.01)
+    Jacobi                : 0.12s  mean-cg=3, trace-cg=68  M=1225
+    plain Kron            : 0.08s  mean-cg=1, trace-cg=7
+    SVDcirc(R=1 )        : 0.27s  mean-cg=1, trace-cg=273
+      [SVDcirc R=1] σ/σ_1: ['1']  Λ range=[1.06e-05, 59.6]  σ²=0.01
+    SVDcirc(R=2 )        : 0.29s  mean-cg=1, trace-cg=268
+    SVDcirc(R=4 )        : 0.30s  mean-cg=1, trace-cg=283
+    SVDcirc(R=8 )        : 0.29s  mean-cg=1, trace-cg=278
+    SVDcirc(R=16)        : 0.31s  mean-cg=1, trace-cg=267
+
+  (ℓ=0.02, σ_f²=1.0, σ²=0.01)
+    Jacobi                : 0.46s  mean-cg=1, trace-cg=63  M=6561
+    plain Kron            : 0.32s  mean-cg=1, trace-cg=13
+    SVDcirc(R=1 )        : 1.16s  mean-cg=1, trace-cg=211
+      [SVDcirc R=1] σ/σ_1: ['1']  Λ range=[9.2e-07, 9.7]  σ²=0.01
+    SVDcirc(R=2 )        : 0.63s  mean-cg=1, trace-cg=209
+    SVDcirc(R=4 )        : 0.60s  mean-cg=1, trace-cg=206
+    SVDcirc(R=8 )        : 0.59s  mean-cg=1, trace-cg=210
+    SVDcirc(R=16)        : 0.65s  mean-cg=1, trace-cg=209
+
+=== Uniform disk (non-product): N=50,000, d=2 ===
+
+  (ℓ=0.05, σ_f²=1.0, σ²=0.01)
+    Jacobi                : 0.09s  mean-cg=3, trace-cg=64  M=1225
+    plain Kron            : 0.10s  mean-cg=1, trace-cg=78
+    SVDcirc(R=1 )        : 0.18s  mean-cg=7, trace-cg=319
+      [SVDcirc R=1] σ/σ_1: ['1']  Λ range=[7.07e-07, 82.7]  σ²=0.01
+    SVDcirc(R=2 )        : 0.16s  mean-cg=1, trace-cg=306
+    SVDcirc(R=4 )        : 0.28s  mean-cg=1, trace-cg=524
+    SVDcirc(R=8 )        : 0.21s  mean-cg=1, trace-cg=421
+    SVDcirc(R=16)        : 0.21s  mean-cg=1, trace-cg=390
+
+  (ℓ=0.02, σ_f²=1.0, σ²=0.01)
+    Jacobi                : 0.24s  mean-cg=1, trace-cg=70  M=6561
+    plain Kron            : 0.47s  mean-cg=1, trace-cg=97
+    SVDcirc(R=1 )        : 0.81s  mean-cg=1, trace-cg=306
+      [SVDcirc R=1] σ/σ_1: ['1']  Λ range=[3.82e-08, 13.4]  σ²=0.01
+    SVDcirc(R=2 )        : 0.74s  mean-cg=1, trace-cg=264
+    SVDcirc(R=4 )        : 0.81s  mean-cg=1, trace-cg=238
+    SVDcirc(R=8 )        : 1.09s  mean-cg=1, trace-cg=224
+    SVDcirc(R=16)        : 0.63s  mean-cg=1, trace-cg=223
+
+=== Uniform annulus (non-product): N=50,000, d=2 ===
+
+  (ℓ=0.05, σ_f²=1.0, σ²=0.01)
+    Jacobi                : 0.09s  mean-cg=1, trace-cg=71  M=1225
+    plain Kron            : 0.11s  mean-cg=1, trace-cg=90
+    SVDcirc(R=1 )        : 0.17s  mean-cg=1, trace-cg=323
+      [SVDcirc R=1] σ/σ_1: ['1']  Λ range=[4.59e-07, 92.7]  σ²=0.01
+    SVDcirc(R=2 )        : 0.17s  mean-cg=5, trace-cg=294
+    SVDcirc(R=4 )        : 0.26s  mean-cg=1, trace-cg=512
+    SVDcirc(R=8 )        : 0.28s  mean-cg=1, trace-cg=519
+    SVDcirc(R=16)        : 0.22s  mean-cg=1, trace-cg=411
+
+  (ℓ=0.02, σ_f²=1.0, σ²=0.01)
+    Jacobi                : 0.30s  mean-cg=1, trace-cg=74  M=6561
+    plain Kron            : 0.40s  mean-cg=1, trace-cg=126
+    SVDcirc(R=1 )        : 0.93s  mean-cg=1, trace-cg=359
+      [SVDcirc R=1] σ/σ_1: ['1']  Λ range=[1.99e-08, 15.2]  σ²=0.01
+    SVDcirc(R=2 )        : 0.68s  mean-cg=1, trace-cg=248
+    SVDcirc(R=4 )        : 0.63s  mean-cg=1, trace-cg=235
+    SVDcirc(R=8 )        : 0.65s  mean-cg=1, trace-cg=237
+    SVDcirc(R=16)        : 0.79s  mean-cg=1, trace-cg=265

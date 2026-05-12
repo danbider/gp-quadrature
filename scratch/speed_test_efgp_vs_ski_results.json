@@ -1,0 +1,143 @@
+{
+  "d": 2,
+  "epsilon": 0.0001,
+  "lengthscales": [
+    0.3,
+    0.1,
+    0.05,
+    0.03,
+    0.02
+  ],
+  "runs": {
+    "10000": {
+      "efgp": {
+        "0.3": {
+          "sec_per_step": 0.054486846923828124,
+          "mtot": 13
+        },
+        "0.1": {
+          "sec_per_step": 0.060272598266601564,
+          "mtot": 23
+        },
+        "0.05": {
+          "sec_per_step": 0.10985145568847657,
+          "mtot": 39
+        },
+        "0.03": {
+          "sec_per_step": 0.08668961524963378,
+          "mtot": 61
+        },
+        "0.02": {
+          "sec_per_step": 0.25258302688598633,
+          "mtot": 89
+        }
+      },
+      "ski_sec_per_step": 0.9910301764806112,
+      "ski_error": null
+    },
+    "100000": {
+      "efgp": {
+        "0.3": {
+          "sec_per_step": 0.07532205581665039,
+          "mtot": 13
+        },
+        "0.1": {
+          "sec_per_step": 0.07646222114562988,
+          "mtot": 23
+        },
+        "0.05": {
+          "sec_per_step": 0.15520162582397462,
+          "mtot": 39
+        },
+        "0.03": {
+          "sec_per_step": 0.13291559219360352,
+          "mtot": 61
+        },
+        "0.02": {
+          "sec_per_step": 0.35251560211181643,
+          "mtot": 89
+        }
+      },
+      "ski_sec_per_step": 14.981196482976278,
+      "ski_error": null
+    },
+    "1000000": {
+      "efgp": {
+        "0.3": {
+          "sec_per_step": 0.1531886100769043,
+          "mtot": 13
+        },
+        "0.1": {
+          "sec_per_step": 0.1781153678894043,
+          "mtot": 23
+        },
+        "0.05": {
+          "sec_per_step": 0.2783477783203125,
+          "mtot": 39
+        },
+        "0.03": {
+          "sec_per_step": 0.24116621017456055,
+          "mtot": 61
+        },
+        "0.02": {
+          "sec_per_step": 0.5335487842559814,
+          "mtot": 89
+        }
+      },
+      "ski_sec_per_step": null,
+      "ski_error": "CG did not converge within 1000 iters (residual ~48); step too slow to complete in reasonable time"
+    },
+    "10000000": {
+      "efgp": {
+        "0.3": {
+          "sec_per_step": 0.9160516262054443,
+          "mtot": 13
+        },
+        "0.1": {
+          "sec_per_step": 1.2867046197255452,
+          "mtot": 23
+        },
+        "0.05": {
+          "sec_per_step": 1.5856959819793701,
+          "mtot": 39
+        },
+        "0.03": {
+          "sec_per_step": 1.456437349319458,
+          "mtot": 61
+        },
+        "0.02": {
+          "sec_per_step": 1.6761639912923176,
+          "mtot": 89
+        }
+      },
+      "ski_sec_per_step": null,
+      "ski_error": "skipped (EFGP-only run)"
+    },
+    "100000000": {
+      "efgp": {
+        "0.3": {
+          "sec_per_step": 21.66619332631429,
+          "mtot": 13
+        },
+        "0.1": {
+          "sec_per_step": 34.11771504084269,
+          "mtot": 23
+        },
+        "0.05": {
+          "sec_per_step": 744.0537516276041,
+          "mtot": 39
+        },
+        "0.03": {
+          "sec_per_step": 52.822292725245156,
+          "mtot": 61
+        },
+        "0.02": {
+          "sec_per_step": 36.73436697324117,
+          "mtot": 89
+        }
+      },
+      "ski_sec_per_step": null,
+      "ski_error": "skipped (EFGP-only run)"
+    }
+  }
+}

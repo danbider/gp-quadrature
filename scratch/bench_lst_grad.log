@@ -1,0 +1,54 @@
+Loading 20 VNP21 granules ...
+x: (1000000, 2)  y: (1000000,)
+iter   1    0.14s  ℓ=0.0909  σf²=1.064  σn²=0.938  cg(mean/trace)=251/105  mtot=21  M=441
+iter   2    0.13s  ℓ=0.08271  σf²=1.13  σn²=0.8784  cg(mean/trace)=218/118  mtot=21  M=441
+iter   3    0.16s  ℓ=0.07517  σf²=1.199  σn²=0.8216  cg(mean/trace)=285/103  mtot=23  M=529
+iter   4    0.17s  ℓ=0.06825  σf²=1.27  σn²=0.7675  cg(mean/trace)=285/126  mtot=25  M=625
+iter   5    0.17s  ℓ=0.06192  σf²=1.343  σn²=0.7166  cg(mean/trace)=315/130  mtot=27  M=729
+iter   6    0.17s  ℓ=0.05613  σf²=1.418  σn²=0.669  cg(mean/trace)=298/113  mtot=29  M=841
+iter   7    0.17s  ℓ=0.05086  σf²=1.495  σn²=0.6251  cg(mean/trace)=253/111  mtot=31  M=961
+iter   8    0.20s  ℓ=0.04603  σf²=1.574  σn²=0.5853  cg(mean/trace)=228/137  mtot=35  M=1225
+iter   9    0.21s  ℓ=0.04165  σf²=1.654  σn²=0.5502  cg(mean/trace)=217/109  mtot=37  M=1369
+iter  10    0.21s  ℓ=0.03765  σf²=1.735  σn²=0.5202  cg(mean/trace)=208/115  mtot=41  M=1681
+iter  11    0.24s  ℓ=0.03401  σf²=1.817  σn²=0.4959  cg(mean/trace)=195/121  mtot=45  M=2025
+iter  12    0.26s  ℓ=0.0307  σf²=1.9  σn²=0.4775  cg(mean/trace)=173/114  mtot=49  M=2401
+iter  13    0.25s  ℓ=0.02769  σf²=1.984  σn²=0.4649  cg(mean/trace)=177/118  mtot=55  M=3025
+iter  14    0.30s  ℓ=0.02497  σf²=2.068  σn²=0.4578  cg(mean/trace)=167/117  mtot=59  M=3481
+iter  15    0.70s  ℓ=0.02252  σf²=2.15  σn²=0.4555  cg(mean/trace)=160/119  mtot=65  M=4225
+iter  16    0.62s  ℓ=0.02031  σf²=2.232  σn²=0.4575  cg(mean/trace)=149/119  mtot=73  M=5329
+iter  17    0.68s  ℓ=0.01832  σf²=2.312  σn²=0.4627  cg(mean/trace)=143/117  mtot=79  M=6241
+iter  18    0.73s  ℓ=0.01653  σf²=2.389  σn²=0.4706  cg(mean/trace)=138/108  mtot=87  M=7569
+iter  19    0.89s  ℓ=0.01496  σf²=2.46  σn²=0.4804  cg(mean/trace)=142/110  mtot=97  M=9409
+iter  20    0.95s  ℓ=0.01359  σf²=2.524  σn²=0.4913  cg(mean/trace)=128/110  mtot=107  M=11449
+iter  21    1.14s  ℓ=0.01239  σf²=2.577  σn²=0.5026  cg(mean/trace)=121/107  mtot=117  M=13689
+iter  22    1.30s  ℓ=0.01136  σf²=2.618  σn²=0.5136  cg(mean/trace)=118/107  mtot=129  M=16641
+iter  23    1.37s  ℓ=0.01048  σf²=2.646  σn²=0.5237  cg(mean/trace)=113/106  mtot=139  M=19321
+iter  24    1.67s  ℓ=0.009733  σf²=2.659  σn²=0.5322  cg(mean/trace)=109/99  mtot=151  M=22801
+iter  25    1.66s  ℓ=0.009117  σf²=2.656  σn²=0.5389  cg(mean/trace)=105/101  mtot=163  M=26569
+iter  26    2.04s  ℓ=0.008621  σf²=2.637  σn²=0.5433  cg(mean/trace)=105/95  mtot=175  M=30625
+iter  27    2.05s  ℓ=0.008235  σf²=2.602  σn²=0.5454  cg(mean/trace)=103/96  mtot=185  M=34225
+iter  28    2.17s  ℓ=0.007947  σf²=2.554  σn²=0.5453  cg(mean/trace)=101/96  mtot=193  M=37249
+iter  29    2.09s  ℓ=0.007747  σf²=2.494  σn²=0.543  cg(mean/trace)=100/92  mtot=199  M=39601
+iter  30    2.36s  ℓ=0.007626  σf²=2.425  σn²=0.5389  cg(mean/trace)=100/92  mtot=205  M=42025
+iter  31    2.86s  ℓ=0.007576  σf²=2.347  σn²=0.5333  cg(mean/trace)=98/94  mtot=209  M=43681
+iter  32    1.77s  ℓ=0.007587  σf²=2.263  σn²=0.5266  cg(mean/trace)=14/90  mtot=209  M=43681
+iter  33    1.83s  ℓ=0.00765  σf²=2.174  σn²=0.5193  cg(mean/trace)=14/91  mtot=209  M=43681
+iter  34    2.40s  ℓ=0.007757  σf²=2.082  σn²=0.5119  cg(mean/trace)=97/92  mtot=207  M=42849
+iter  35    2.36s  ℓ=0.0079  σf²=1.988  σn²=0.5047  cg(mean/trace)=97/89  mtot=205  M=42025
+iter  36    2.58s  ℓ=0.008073  σf²=1.892  σn²=0.4982  cg(mean/trace)=97/91  mtot=201  M=40401
+iter  37    2.09s  ℓ=0.008266  σf²=1.796  σn²=0.4927  cg(mean/trace)=96/91  mtot=197  M=38809
+iter  38    2.14s  ℓ=0.008474  σf²=1.7  σn²=0.4885  cg(mean/trace)=97/90  mtot=193  M=37249
+iter  39    1.87s  ℓ=0.008689  σf²=1.606  σn²=0.4857  cg(mean/trace)=97/89  mtot=187  M=34969
+iter  40    2.13s  ℓ=0.008904  σf²=1.513  σn²=0.4844  cg(mean/trace)=96/91  mtot=183  M=33489
+iter  41    2.17s  ℓ=0.009106  σf²=1.424  σn²=0.4846  cg(mean/trace)=96/90  mtot=179  M=32041
+iter  42    1.68s  ℓ=0.00929  σf²=1.338  σn²=0.4862  cg(mean/trace)=96/89  mtot=175  M=30625
+iter  43    1.74s  ℓ=0.009449  σf²=1.255  σn²=0.489  cg(mean/trace)=96/92  mtot=171  M=29241
+iter  44    3.07s  ℓ=0.009582  σf²=1.177  σn²=0.4929  cg(mean/trace)=91/90  mtot=167  M=27889
+iter  45    3.24s  ℓ=0.009685  σf²=1.102  σn²=0.4973  cg(mean/trace)=90/86  mtot=165  M=27225
+iter  46    2.33s  ℓ=0.009756  σf²=1.031  σn²=0.5022  cg(mean/trace)=89/87  mtot=163  M=26569
+iter  47    1.29s  ℓ=0.00979  σf²=0.9649  σn²=0.5071  cg(mean/trace)=16/86  mtot=163  M=26569
+iter  48    1.62s  ℓ=0.00979  σf²=0.9024  σn²=0.5118  cg(mean/trace)=86/85  mtot=161  M=25921
+iter  49    1.25s  ℓ=0.009763  σf²=0.8436  σn²=0.5158  cg(mean/trace)=17/85  mtot=161  M=25921
+iter  50    1.59s  ℓ=0.009706  σf²=0.7886  σn²=0.5192  cg(mean/trace)=84/84  mtot=163  M=26569
+
+Wrote /Users/colecitrenbaum/Documents/GPs/gp-quadrature/scratch/bench_lst_grad.json

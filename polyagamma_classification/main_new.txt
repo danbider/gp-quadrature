@@ -1,0 +1,247 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{enumitem}
+\usepackage{listings,xcolor}
+\definecolor{codebg}{rgb}{0.97,0.97,0.97}
+\lstset{
+  language=Python, backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\footnotesize, breaklines=true,
+  columns=fullflexible, frame=single, framerule=0.4pt,
+  xleftmargin=6pt, xrightmargin=6pt, aboveskip=4pt, belowskip=4pt,
+}
+\newcommand{\Tr}{\operatorname{tr}}
+\newcommand{\Diag}{\operatorname{diag}}
+
+\title{M step for the Pólya--Gamma GP classifier}
+\author{}
+\date{}
+\begin{document}
+\maketitle
+
+\section*{Notation}
+
+\begin{tabular}{@{}l l@{}}
+$n$, $m$            & \# data points, \# Fourier modes \\
+$F$                 & NUFFT type-2, $n\times m$, evaluates $m$ modes at $n$ points \\
+$F^{*}$             & adjoint (NUFFT type-1) \\
+$D^{2}\in\mathbb{R}^{m}$       & spectral diagonal, $D^{2}_j = h^{d}\hat k(\xi_j;\theta)$ \\
+$\partial_\theta D^{2}\in\mathbb{R}^{m\times p}$ & gradient of $D^{2}$ wrt hyperparameters $\theta\in\mathbb{R}^{p}$ \\
+$K$                 & kernel, $K = F D^{2} F^{*}$ (never formed) \\
+$\Delta\in\mathbb{R}^{n}$       & $\Diag \mathbb{E}_q[\omega]$, Pólya--Gamma weights from the E step \\
+$\kappa\in\mathbb{R}^{n}$       & effective observation (Bernoulli: $y-\tfrac12$; NB: $\tfrac12(y-r)$) \\
+$\Sigma$            & variational covariance, $\Sigma^{-1}=K^{-1}+\Delta$ \\
+$\mu=\Sigma\kappa$  & variational mean \\
+$z^{(j)}\in\{\pm1\}^n$ & Rademacher probes, $j=1,\dots,J$ \\
+\end{tabular}
+
+\section{The gradient we are computing}
+
+The ELBO has a $\theta$-dependent part
+\[
+  \mathcal{L}(\theta) \;=\; -\tfrac12\log\det K
+  -\tfrac12\mu^{\top}K^{-1}\mu
+  -\tfrac12\Tr(K^{-1}\Sigma).
+\]
+Differentiating and using $\Sigma K^{-1}=I-\Sigma\Delta$
+(which follows from $\Sigma(K^{-1}+\Delta)=I$) cancels the $\log\det$
+term against part of the trace term, leaving
+\begin{equation}
+\boxed{\;
+  \nabla_\theta \mathcal{L}
+  \;=\;
+  \tfrac12\underbrace{\mu^{\top}K^{-1}\partial_\theta K\,K^{-1}\mu}_{\text{Term I}}
+  \;-\;
+  \tfrac12\underbrace{\Tr\!\bigl(K^{-1}\Sigma\Delta\,\partial_\theta K\bigr)}_{\text{Term II}}.
+\;}
+\label{eq:grad}
+\end{equation}
+
+\section{Two linear systems}
+
+The entire M step reduces to two linear-algebra primitives. Everything
+else is an NUFFT or a diagonal multiply; $K^{-1}$ is never formed.
+
+Both primitives rewrite $K^{-1}v$ for some data-space vector $v$ using
+the identity that comes straight from
+$\Sigma^{-1}=K^{-1}+\Delta$:
+\begin{equation}
+  K^{-1}v \;=\; \Sigma^{-1}v \;-\; \Delta v.
+  \label{eq:Kinv-trick}
+\end{equation}
+Because $K=FD^{2}F^{*}$, any such $v$ satisfies
+$v = FD^{2}\beta(v)$ with $\beta(v)=F^{*}K^{-1}v$---just the Fourier
+coefficients of $v$ under the spectral model.
+
+\subsection{System I: $K^{-1}\mu$ (for Term I of the gradient)}
+
+We want $\beta^{(\mu)} := F^{*}K^{-1}\mu$. Plug $v=\mu$ into
+\eqref{eq:Kinv-trick} and use $\Sigma^{-1}\mu=\kappa$:
+\begin{equation}
+  K^{-1}\mu \;=\; \kappa - \Delta\mu.
+  \label{eq:Kinvmu}
+\end{equation}
+Apply $F^{*}$ and substitute $\mu = FD^{2}\beta^{(\mu)}$:
+\begin{equation}
+  \beta^{(\mu)} \;=\; F^{*}\kappa \;-\; F^{*}\Delta F D^{2}\beta^{(\mu)}
+  \quad\Longleftrightarrow\quad
+  \boxed{(I_m + F^{*}\Delta F D^{2})\,\beta^{(\mu)} \;=\; F^{*}\kappa.}
+  \label{eq:sysI}
+\end{equation}
+This is one linear solve for one vector. There is no stochasticity.
+It gives everything we need to evaluate Term I of \eqref{eq:grad}:
+using $\partial_\theta K = F(\partial_\theta D^{2})F^{*}$,
+\begin{equation}
+  \mu^{\top}K^{-1}\partial_\theta K\,K^{-1}\mu
+  \;=\; (\beta^{(\mu)})^{*}(\partial_\theta D^{2})\beta^{(\mu)}
+  \;=\; \sum_{k=1}^{m}(\partial_\theta D^{2})_{k}\,|\beta^{(\mu)}_{k}|^{2}.
+  \label{eq:termI}
+\end{equation}
+
+\subsection{System II: $K^{-1}\Sigma z^{(j)}$ (for Term II of the gradient)}
+
+For Term II we need a stochastic estimator of
+$\Tr(K^{-1}\Sigma\Delta\,\partial_\theta K)$. With Rademacher probes
+$z^{(j)}\in\{\pm1\}^{n}$,
+\begin{equation}
+  \Tr(K^{-1}\Sigma\Delta\,\partial_\theta K)
+  \;=\; \Tr(\Delta\,\partial_\theta K\,K^{-1}\Sigma)
+  \;=\; \mathbb{E}_{z}\bigl[(\Delta z)^{\top}\partial_\theta K\,K^{-1}\Sigma\,z\bigr].
+\end{equation}
+To evaluate the integrand we need $F^{*}K^{-1}\Sigma z^{(j)}$ for each
+probe. Plug $v=\Sigma z^{(j)}$ into \eqref{eq:Kinv-trick} and use
+$\Sigma^{-1}\Sigma z^{(j)}=z^{(j)}$:
+\begin{equation}
+  K^{-1}\Sigma z^{(j)} \;=\; z^{(j)} - \Delta\Sigma z^{(j)}.
+  \label{eq:KinvSz}
+\end{equation}
+Apply $F^{*}$ and substitute $\Sigma z^{(j)}=FD^{2}\beta^{(j)}$:
+\begin{equation}
+  \boxed{(I_m + F^{*}\Delta F D^{2})\,\beta^{(j)} \;=\; F^{*} z^{(j)},
+  \qquad j=1,\dots,J.}
+  \label{eq:sysII}
+\end{equation}
+That is $J$ linear solves, one per probe. The integrand of Term II
+then becomes
+\begin{equation}
+  (\Delta z^{(j)})^{\top}\partial_\theta K\,K^{-1}\Sigma z^{(j)}
+  \;=\; (R^{(j)})^{*}(\partial_\theta D^{2})\beta^{(j)}
+  \;=\; \sum_{k}(\partial_\theta D^{2})_{k}\,\overline{R^{(j)}_{k}}\,\beta^{(j)}_{k},
+  \qquad R^{(j)}:=F^{*}(\Delta z^{(j)}),
+\end{equation}
+and the stochastic estimate of Term II is
+\begin{equation}
+  \Tr(K^{-1}\Sigma\Delta\,\partial_\theta K)
+  \;\approx\;
+  \frac{1}{J}\sum_{j=1}^{J}\Re\!\sum_{k=1}^{m}
+  (\partial_\theta D^{2})_{k}\,\overline{R^{(j)}_{k}}\,\beta^{(j)}_{k}.
+  \label{eq:termII}
+\end{equation}
+
+\subsection{Shared operator and batched solve}
+
+Systems \eqref{eq:sysI} and \eqref{eq:sysII} carry the \emph{same}
+left-hand side. Symmetrizing with $y := D\beta$ gives the Hermitian
+PD operator
+\begin{equation}
+  A \;:=\; I_m + D F^{*}\Delta F D,
+  \qquad
+  A y \;=\; D q, \qquad \beta = y / D,
+  \label{eq:Asys}
+\end{equation}
+with $q=F^{*}\kappa$ for System I and $q=F^{*}z^{(j)}$ for System II.
+One batched CG call on $A$ with the stacked right-hand-side block
+$[F^{*}z^{(1)},\dots,F^{*}z^{(J)},F^{*}\kappa]$ produces
+$\beta^{(1)},\dots,\beta^{(J)},\beta^{(\mu)}$ in a single pass.
+
+\paragraph{Gradient.} Plugging \eqref{eq:termI} and \eqref{eq:termII}
+into \eqref{eq:grad} gives, componentwise for each
+$\ell=1,\dots,p$,
+\begin{equation}
+\boxed{\;
+  \bigl[\nabla_\theta\mathcal{L}\bigr]_\ell
+  \;=\;
+  \tfrac12\sum_{k}(\partial_\theta D^{2})_{k\ell}\,|\beta^{(\mu)}_{k}|^{2}
+  \;-\;
+  \tfrac12\cdot\frac{1}{J}\sum_{j=1}^{J}\Re\!\sum_{k}
+  (\partial_\theta D^{2})_{k\ell}\,\overline{R^{(j)}_{k}}\,\beta^{(j)}_{k}.
+\;}
+\label{eq:grad-final}
+\end{equation}
+
+\section{Implementation}
+
+Inputs: $\kappa\in\mathbb{R}^{n}$, $\Delta\in\mathbb{R}^{n}$,
+$D\in\mathbb{R}^{m}$ (code name \texttt{ws}),
+$\partial_\theta D^{2}\in\mathbb{R}^{m\times p}$ (code name
+\texttt{Dprime}), operators $F=\texttt{fwd}$, $F^{*}=\texttt{fadj}$,
+probe count $J=\texttt{n\_probes}$.
+
+\begin{enumerate}[leftmargin=1.6em,itemsep=2pt]
+  \item \textbf{Draw probes.}
+    Sample $z^{(1)},\dots,z^{(J)}\in\{\pm1\}^{n}$.
+  \item \textbf{Build all RHSs at once.}
+    Apply $F^{*}$ to $[z^{(1)},\dots,z^{(J)},\kappa]$ in one batched
+    NUFFT type-1 to form
+    $Q=[F^{*}z^{(1)},\dots,F^{*}z^{(J)},F^{*}\kappa]\in\mathbb{C}^{(J+1)\times m}$.
+    This is the right-hand-side block of \eqref{eq:beta-mu}--\eqref{eq:beta-j}.
+  \item \textbf{One batched CG solve.}
+    Solve the Hermitian system $A\,y_{\text{all}} = D\,Q$ for all
+    $J{+}1$ right-hand sides simultaneously (Step~2 of
+    \eqref{eq:Asys}), where
+    $A u = u + D\,F^{*}(\Delta\,F(Du))$ is matrix-free. Divide by $D$:
+    $\beta_{\text{all}} = y_{\text{all}}/D$. Split off the last row as
+    $\beta^{(\mu)}$ and the first $J$ rows as $\beta^{(j)}$.
+  \item \textbf{Term I.}
+    Compute $|\beta^{(\mu)}|^{2}$ elementwise, then
+    $\text{term1} = (\partial_\theta D^{2})^{\top}|\beta^{(\mu)}|^{2}\in\mathbb{R}^{p}$
+    (eq.~\eqref{eq:termI}).
+  \item \textbf{Probe side of Term II.}
+    Apply $F^{*}$ to $[\Delta z^{(1)},\dots,\Delta z^{(J)}]$ in one
+    batched NUFFT type-1 to get $R=[R^{(1)},\dots,R^{(J)}]\in\mathbb{C}^{J\times m}$.
+  \item \textbf{Assemble Term II.}
+    Form the elementwise product $X_{jk}=\overline{R^{(j)}_{k}}\,\beta^{(j)}_{k}$
+    and compute
+    $\text{per\_probe}_{j\ell} = \Re\sum_{k}(\partial_\theta D^{2})_{k\ell}\,X_{jk}$,
+    a $J\times p$ matrix. Then
+    $\text{term2} = \tfrac{1}{J}\sum_{j}\text{per\_probe}_{j\cdot}\in\mathbb{R}^{p}$
+    (eq.~\eqref{eq:termII}).
+  \item \textbf{Gradient.}
+    $\text{grad} = \tfrac12(\text{term1} - \text{term2})\in\mathbb{R}^{p}$
+    (eq.~\eqref{eq:grad-final}).
+\end{enumerate}
+
+\section{Code (\texttt{pg\_classifier.py::\_compute\_mstep\_gradient})}
+
+\begin{lstlisting}
+# Step 1: probes  z^(j) in {+/-1}^n
+probes = rademacher((n_probes, n))
+
+# Step 2: RHS block Q = F* [probes; kappa]
+Q_block = fadj_batched(probes)                      # (J, m)   F* z^(j)
+q_y     = fadj_batched(kappa.unsqueeze(0))          # (1, m)   F* kappa
+Q_all   = cat([Q_block, q_y], dim=0)                # (J+1, m)
+
+# Step 3: one batched CG on  A y = D Q,  A = I + D F* Delta F D
+#         then beta = y / D.  solve_A_beta hides the symmetrization.
+beta_all, _ = solve_A_beta(Q_all)                    # (J+1, m)
+beta_probes = beta_all[:-1, :]                       # beta^(j),  (J, m)
+beta_x      = beta_all[-1, :]                        # beta^(mu), (m,)
+
+# Step 4: Term I  =  (dD2)^T |beta^(mu)|^2
+abs2  = (beta_x.conj() * beta_x).real
+term1 = Dprime.real.T @ abs2                         # (p,)
+
+# Step 5: R^(j) = F* (Delta z^(j))
+Rfeat = fadj_batched(apply_omega(probes.mT).T).T     # (J, m)
+
+# Step 6: per-probe scalar  sum_k (dD2)_k conj(R^(j))_k beta^(j)_k, then mean
+X     = Rfeat.conj() * beta_probes.T                 # (m, J)  (broadcast)
+vals  = (X.mT @ Dprime).real                         # (J, p)
+term2 = vals.mean(dim=0)                             # (p,)
+
+# Step 7: gradient
+grad = 0.5 * (term1 - term2)                         # (p,)
+\end{lstlisting}
+
+\end{document}

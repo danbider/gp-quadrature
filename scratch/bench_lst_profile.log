@@ -1,0 +1,107 @@
+Loading 20 VNP21 granules ...
+x: (16493039, 2)  y: (16493039,)
+Using full dataset = 16,493,039 points
+* iter   1    2.98s  ℓ=0.2519  M=    81  cg(m/t)=162/83 [PROF]
+   section breakdown (s) for iter 1:
+     0_book_keeping                0.020  ( 1.6%)
+     1_frequency_grid_setup        0.002  ( 0.1%)
+     2_nufft_setup                 0.221  (18.0%)
+     3_toeplitz_setup              0.708  (57.5%)
+     4_solve_cg                    0.235  (19.1%)
+     5_compute_term2               0.003  ( 0.2%)
+     6_monte_carlo_trace           0.002  ( 0.2%)
+     7_batch_cg_solve              0.039  ( 3.2%)
+     7.5_compute_alpha             0.001  ( 0.0%)
+     8_gradient_calculation        0.000  ( 0.0%)
+     sum-of-sections               1.230
+  iter   2    2.32s  ℓ=0.2121  M=    81  cg(m/t)=162/44 [PROF]
+   section breakdown (s) for iter 2:
+     0_book_keeping                0.018  ( 2.0%)
+     1_frequency_grid_setup        0.000  ( 0.1%)
+     2_nufft_setup                 0.168  (18.4%)
+     3_toeplitz_setup              0.512  (56.3%)
+     4_solve_cg                    0.185  (20.4%)
+     5_compute_term2               0.002  ( 0.2%)
+     6_monte_carlo_trace           0.000  ( 0.0%)
+     7_batch_cg_solve              0.023  ( 2.5%)
+     7.5_compute_alpha             0.000  ( 0.0%)
+     8_gradient_calculation        0.000  ( 0.0%)
+     sum-of-sections               0.909
+  iter   3    1.09s  ℓ=0.1797  M=    81  cg(m/t)=162/60
+  iter   4    1.17s  ℓ=0.1545  M=    81  cg(m/t)=162/48
+  iter   5    1.31s  ℓ=0.1349  M=    81  cg(m/t)=162/74
+* iter   6    4.10s  ℓ=0.1158  M=   169  cg(m/t)=338/107 [PROF]
+   section breakdown (s) for iter 6:
+     0_book_keeping                0.027  ( 2.4%)
+     1_frequency_grid_setup        0.001  ( 0.0%)
+     2_nufft_setup                 0.241  (20.9%)
+     3_toeplitz_setup              0.575  (49.9%)
+     4_solve_cg                    0.265  (23.0%)
+     5_compute_term2               0.003  ( 0.2%)
+     6_monte_carlo_trace           0.000  ( 0.0%)
+     7_batch_cg_solve              0.040  ( 3.4%)
+     7.5_compute_alpha             0.000  ( 0.0%)
+     8_gradient_calculation        0.000  ( 0.0%)
+     sum-of-sections               1.152
+  iter   7    0.79s  ℓ=0.09969  M=   169  cg(m/t)=338/69
+  iter   8    1.13s  ℓ=0.08644  M=   169  cg(m/t)=338/77
+  iter   9    1.16s  ℓ=0.07584  M=   169  cg(m/t)=338/70
+  iter  10    3.03s  ℓ=0.06733  M=   169  cg(m/t)=177/83 [PROF]
+   section breakdown (s) for iter 10:
+     0_book_keeping                0.021  ( 2.0%)
+     1_frequency_grid_setup        0.000  ( 0.0%)
+     2_nufft_setup                 0.203  (18.8%)
+     3_toeplitz_setup              0.575  (53.2%)
+     4_solve_cg                    0.235  (21.8%)
+     5_compute_term2               0.003  ( 0.3%)
+     6_monte_carlo_trace           0.000  ( 0.0%)
+     7_batch_cg_solve              0.040  ( 3.7%)
+     7.5_compute_alpha             0.001  ( 0.1%)
+     8_gradient_calculation        0.000  ( 0.0%)
+     sum-of-sections               1.081
+* iter  11    1.63s  ℓ=0.05891  M=   529  cg(m/t)=627/110
+  iter  12    1.37s  ℓ=0.05137  M=   529  cg(m/t)=411/52
+  iter  13    1.17s  ℓ=0.04495  M=   529  cg(m/t)=459/57
+  iter  14    1.21s  ℓ=0.03964  M=   529  cg(m/t)=417/71
+  iter  15    1.24s  ℓ=0.03529  M=   529  cg(m/t)=208/74
+* iter  16    5.13s  ℓ=0.03097  M=  1681  cg(m/t)=444/115 [PROF]
+   section breakdown (s) for iter 16:
+     0_book_keeping                0.025  ( 1.8%)
+     1_frequency_grid_setup        0.001  ( 0.1%)
+     2_nufft_setup                 0.241  (17.4%)
+     3_toeplitz_setup              0.658  (47.7%)
+     4_solve_cg                    0.373  (27.0%)
+     5_compute_term2               0.002  ( 0.1%)
+     6_monte_carlo_trace           0.001  ( 0.1%)
+     7_batch_cg_solve              0.080  ( 5.8%)
+     7.5_compute_alpha             0.000  ( 0.0%)
+     8_gradient_calculation        0.000  ( 0.0%)
+     sum-of-sections               1.380
+  iter  17    0.95s  ℓ=0.02719  M=  1681  cg(m/t)=311/50
+  iter  18    1.21s  ℓ=0.024  M=  1681  cg(m/t)=392/74
+  iter  19    1.18s  ℓ=0.02136  M=  1681  cg(m/t)=230/48
+  iter  20    1.26s  ℓ=0.01916  M=  1681  cg(m/t)=368/84
+* iter  21    1.50s  ℓ=0.01687  M=  5329  cg(m/t)=284/98
+  iter  22    1.45s  ℓ=0.01485  M=  5329  cg(m/t)=204/44
+  iter  23    1.56s  ℓ=0.01316  M=  5329  cg(m/t)=270/60
+  iter  24    1.33s  ℓ=0.01176  M=  5329  cg(m/t)=148/63
+  iter  25    3.65s  ℓ=0.0106  M=  5329  cg(m/t)=211/75 [PROF]
+   section breakdown (s) for iter 25:
+     0_book_keeping                0.029  ( 2.2%)
+     1_frequency_grid_setup        0.001  ( 0.1%)
+     2_nufft_setup                 0.181  (13.9%)
+     3_toeplitz_setup              0.648  (49.7%)
+     4_solve_cg                    0.364  (27.9%)
+     5_compute_term2               0.002  ( 0.1%)
+     6_monte_carlo_trace           0.001  ( 0.1%)
+     7_batch_cg_solve              0.078  ( 6.0%)
+     7.5_compute_alpha             0.000  ( 0.0%)
+     8_gradient_calculation        0.000  ( 0.0%)
+     sum-of-sections               1.304
+* iter  26    2.16s  ℓ=0.009382  M= 17689  cg(m/t)=178/102
+  iter  27    1.69s  ℓ=0.00831  M= 17689  cg(m/t)=103/40
+  iter  28    1.81s  ℓ=0.007436  M= 17689  cg(m/t)=130/49
+  iter  29    1.75s  ℓ=0.006736  M= 17689  cg(m/t)=80/55
+  iter  30    1.90s  ℓ=0.006171  M= 17689  cg(m/t)=129/54
+
+Wrote /Users/colecitrenbaum/Documents/GPs/gp-quadrature/scratch/bench_lst_profile.json

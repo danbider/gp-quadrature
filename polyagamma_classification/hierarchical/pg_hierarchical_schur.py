@@ -81,7 +81,7 @@ def _build_toeplitz_operators(
     delta_c = delta.to(dtype=cdtype)
     conv_shape = tuple(2 * s - 1 for s in spec_g.out_shape)
     v_all = spec_g.nufft_op.type1(delta_c, out_shape=conv_shape)
-    T_all = ToeplitzND(v_all.to(dtype=cdtype), force_pow2=True)
+    T_all = ToeplitzND(v_all.to(dtype=cdtype), force_pow2=False)
 
     T_locs = []
     for ell, idx in enumerate(loc_indices):
@@ -89,7 +89,7 @@ def _build_toeplitz_operators(
         delta_ell = delta[idx].to(dtype=cdtype)
         conv_shape_ell = tuple(2 * s - 1 for s in spec_ell.out_shape)
         v_ell = spec_ell.nufft_op.type1(delta_ell, out_shape=conv_shape_ell)
-        T_locs.append(ToeplitzND(v_ell.to(dtype=cdtype), force_pow2=True))
+        T_locs.append(ToeplitzND(v_ell.to(dtype=cdtype), force_pow2=False))
 
     return Dg_half, Dh_half, T_all, T_locs
 

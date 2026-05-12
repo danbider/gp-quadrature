@@ -11,9 +11,14 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_MODULE_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _MODULE_DIR.parents[2]
 _DEFAULT_FILENAME = "oisst-avhrr-v02r01.20260315_preliminary.nc"
-_DEFAULT_PATH = _REPO_ROOT / _DEFAULT_FILENAME
+_SEARCH_DIRS = (
+    _MODULE_DIR,
+    _MODULE_DIR / "data",
+    _REPO_ROOT,
+)
 _GRID_VARIABLES = {"sst", "anom", "err", "ice"}
 
 
@@ -32,12 +37,21 @@ def _decode_attr(value):
 
 
 def _resolve_path(path=None):
-    dataset_path = _DEFAULT_PATH if path is None else Path(path)
-    if not dataset_path.is_absolute():
-        dataset_path = _REPO_ROOT / dataset_path
-    if not dataset_path.exists():
-        raise FileNotFoundError(f"OISST dataset not found: {dataset_path}")
-    return dataset_path
+    candidate = Path(path) if path is not None else Path(_DEFAULT_FILENAME)
+    if candidate.is_absolute():
+        if candidate.exists():
+            return candidate
+        raise FileNotFoundError(f"OISST dataset not found: {candidate}")
+
+    tried = []
+    for base in _SEARCH_DIRS:
+        p = (base / candidate).resolve()
+        if p.exists():
+            return p
+        tried.append(str(p))
+    raise FileNotFoundError(
+        "OISST dataset not found. Looked in:\n  " + "\n  ".join(tried)
+    )
 
 
 def _wrap_longitudes(lon):

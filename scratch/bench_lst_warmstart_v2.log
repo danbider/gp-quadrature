@@ -1,0 +1,160 @@
+Loading 20 VNP21 granules ...
+x: (1000000, 2)  y: (1000000,)
+
+=== baseline  refresh_every=0 ===
+   iter   1    0.14s  ℓ=0.0909  σf²=1.064  σn²=0.938  cg(mean/trace)=240/105  mtot=21  M=441
+   iter   2    0.15s  ℓ=0.08271  σf²=1.13  σn²=0.8784  cg(mean/trace)=175/116  mtot=21  M=441
+   iter   3    0.17s  ℓ=0.07517  σf²=1.199  σn²=0.8216  cg(mean/trace)=284/111  mtot=23  M=529
+   iter   4    0.27s  ℓ=0.06825  σf²=1.27  σn²=0.7675  cg(mean/trace)=322/126  mtot=25  M=625
+   iter   5    0.29s  ℓ=0.06192  σf²=1.343  σn²=0.7166  cg(mean/trace)=333/127  mtot=27  M=729
+   iter   6    0.28s  ℓ=0.05614  σf²=1.418  σn²=0.669  cg(mean/trace)=331/123  mtot=29  M=841
+   iter   7    0.31s  ℓ=0.05086  σf²=1.495  σn²=0.6251  cg(mean/trace)=290/109  mtot=31  M=961
+   iter   8    0.32s  ℓ=0.04604  σf²=1.574  σn²=0.5853  cg(mean/trace)=229/138  mtot=35  M=1225
+   iter   9    0.33s  ℓ=0.04165  σf²=1.654  σn²=0.5502  cg(mean/trace)=206/109  mtot=37  M=1369
+   iter  10    0.35s  ℓ=0.03765  σf²=1.735  σn²=0.5202  cg(mean/trace)=200/114  mtot=41  M=1681
+   iter  11    0.56s  ℓ=0.03402  σf²=1.817  σn²=0.4959  cg(mean/trace)=200/121  mtot=45  M=2025
+   iter  12    0.42s  ℓ=0.03071  σf²=1.9  σn²=0.4775  cg(mean/trace)=191/109  mtot=49  M=2401
+   iter  13    0.44s  ℓ=0.02769  σf²=1.984  σn²=0.4649  cg(mean/trace)=172/118  mtot=55  M=3025
+   iter  14    0.62s  ℓ=0.02498  σf²=2.068  σn²=0.4578  cg(mean/trace)=167/117  mtot=59  M=3481
+   iter  15    0.47s  ℓ=0.02253  σf²=2.15  σn²=0.4555  cg(mean/trace)=160/120  mtot=65  M=4225
+   iter  16    0.61s  ℓ=0.02031  σf²=2.232  σn²=0.4575  cg(mean/trace)=156/119  mtot=73  M=5329
+   iter  17    0.55s  ℓ=0.01832  σf²=2.312  σn²=0.4628  cg(mean/trace)=143/116  mtot=79  M=6241
+   iter  18    0.63s  ℓ=0.01654  σf²=2.388  σn²=0.4706  cg(mean/trace)=131/108  mtot=87  M=7569
+   iter  19    0.74s  ℓ=0.01496  σf²=2.46  σn²=0.4804  cg(mean/trace)=137/109  mtot=97  M=9409
+   iter  20    0.78s  ℓ=0.01359  σf²=2.523  σn²=0.4913  cg(mean/trace)=128/110  mtot=107  M=11449
+   iter  21    0.90s  ℓ=0.01239  σf²=2.577  σn²=0.5026  cg(mean/trace)=121/107  mtot=117  M=13689
+   iter  22    1.51s  ℓ=0.01136  σf²=2.618  σn²=0.5136  cg(mean/trace)=117/107  mtot=129  M=16641
+   iter  23    1.19s  ℓ=0.01048  σf²=2.646  σn²=0.5237  cg(mean/trace)=115/104  mtot=139  M=19321
+   iter  24    1.45s  ℓ=0.009734  σf²=2.659  σn²=0.5322  cg(mean/trace)=109/99  mtot=151  M=22801
+   iter  25    2.60s  ℓ=0.009117  σf²=2.656  σn²=0.5389  cg(mean/trace)=108/101  mtot=163  M=26569
+   iter  26    2.64s  ℓ=0.008621  σf²=2.637  σn²=0.5433  cg(mean/trace)=105/95  mtot=175  M=30625
+   iter  27    2.01s  ℓ=0.008235  σf²=2.602  σn²=0.5454  cg(mean/trace)=103/96  mtot=185  M=34225
+   iter  28    1.85s  ℓ=0.007947  σf²=2.554  σn²=0.5453  cg(mean/trace)=101/96  mtot=193  M=37249
+   iter  29    1.66s  ℓ=0.007746  σf²=2.494  σn²=0.543  cg(mean/trace)=100/92  mtot=199  M=39601
+   iter  30    1.90s  ℓ=0.007626  σf²=2.425  σn²=0.5389  cg(mean/trace)=100/91  mtot=205  M=42025
+   iter  31    2.26s  ℓ=0.007576  σf²=2.347  σn²=0.5333  cg(mean/trace)=98/95  mtot=209  M=43681
+   iter  32    1.65s  ℓ=0.007587  σf²=2.263  σn²=0.5266  cg(mean/trace)=14/90  mtot=209  M=43681
+   iter  33    1.40s  ℓ=0.007649  σf²=2.175  σn²=0.5193  cg(mean/trace)=14/91  mtot=209  M=43681
+   iter  34    1.90s  ℓ=0.007757  σf²=2.082  σn²=0.5119  cg(mean/trace)=97/92  mtot=207  M=42849
+   iter  35    1.79s  ℓ=0.0079  σf²=1.988  σn²=0.5047  cg(mean/trace)=97/89  mtot=205  M=42025
+   iter  36    1.92s  ℓ=0.008072  σf²=1.892  σn²=0.4982  cg(mean/trace)=97/91  mtot=201  M=40401
+   iter  37    2.17s  ℓ=0.008265  σf²=1.796  σn²=0.4927  cg(mean/trace)=97/91  mtot=197  M=38809
+   iter  38    1.64s  ℓ=0.008474  σf²=1.7  σn²=0.4885  cg(mean/trace)=96/90  mtot=193  M=37249
+   iter  39    1.42s  ℓ=0.008689  σf²=1.606  σn²=0.4857  cg(mean/trace)=96/89  mtot=187  M=34969
+   iter  40    1.50s  ℓ=0.008903  σf²=1.514  σn²=0.4844  cg(mean/trace)=96/92  mtot=183  M=33489
+   iter  41    1.44s  ℓ=0.009106  σf²=1.424  σn²=0.4846  cg(mean/trace)=97/91  mtot=179  M=32041
+   iter  42    1.63s  ℓ=0.00929  σf²=1.338  σn²=0.4862  cg(mean/trace)=96/89  mtot=175  M=30625
+   iter  43    1.49s  ℓ=0.009449  σf²=1.255  σn²=0.489  cg(mean/trace)=96/92  mtot=171  M=29241
+   iter  44    1.53s  ℓ=0.009583  σf²=1.177  σn²=0.4929  cg(mean/trace)=91/89  mtot=167  M=27889
+   iter  45    1.33s  ℓ=0.009686  σf²=1.102  σn²=0.4973  cg(mean/trace)=90/86  mtot=165  M=27225
+   iter  46    1.14s  ℓ=0.009757  σf²=1.032  σn²=0.5022  cg(mean/trace)=89/87  mtot=163  M=26569
+   iter  47    1.01s  ℓ=0.00979  σf²=0.9652  σn²=0.5071  cg(mean/trace)=16/86  mtot=163  M=26569
+   iter  48    1.46s  ℓ=0.009791  σf²=0.9027  σn²=0.5118  cg(mean/trace)=86/86  mtot=161  M=25921
+   iter  49    0.87s  ℓ=0.009763  σf²=0.8439  σn²=0.5159  cg(mean/trace)=17/85  mtot=161  M=25921
+   iter  50    1.12s  ℓ=0.009707  σf²=0.7889  σn²=0.5192  cg(mean/trace)=84/85  mtot=163  M=26569
+
+=== refresh_every_5  refresh_every=5 ===
+ * iter   1    0.19s  ℓ=0.0909  σf²=1.064  σn²=0.938  cg(mean/trace)=256/139  mtot=21  M=441
+   iter   2    0.18s  ℓ=0.08276  σf²=1.13  σn²=0.8784  cg(mean/trace)=196/144  mtot=21  M=441
+   iter   3    0.19s  ℓ=0.0755  σf²=1.197  σn²=0.8216  cg(mean/trace)=228/129  mtot=21  M=441
+   iter   4    0.19s  ℓ=0.06903  σf²=1.266  σn²=0.7677  cg(mean/trace)=199/120  mtot=21  M=441
+   iter   5    0.19s  ℓ=0.0633  σf²=1.337  σn²=0.7169  cg(mean/trace)=220/155  mtot=21  M=441
+ * iter   6    0.24s  ℓ=0.05787  σf²=1.41  σn²=0.6695  cg(mean/trace)=307/142  mtot=29  M=841
+   iter   7    0.18s  ℓ=0.05277  σf²=1.486  σn²=0.6257  cg(mean/trace)=167/122  mtot=29  M=841
+   iter   8    0.26s  ℓ=0.0481  σf²=1.563  σn²=0.5861  cg(mean/trace)=209/146  mtot=29  M=841
+   iter   9    0.23s  ℓ=0.04392  σf²=1.639  σn²=0.5514  cg(mean/trace)=191/119  mtot=29  M=841
+   iter  10    0.23s  ℓ=0.04024  σf²=1.715  σn²=0.5223  cg(mean/trace)=207/139  mtot=29  M=841
+ * iter  11    0.37s  ℓ=0.03673  σf²=1.794  σn²=0.4986  cg(mean/trace)=192/116  mtot=43  M=1849
+   iter  12    0.43s  ℓ=0.03344  σf²=1.875  σn²=0.4808  cg(mean/trace)=118/128  mtot=43  M=1849
+   iter  13    0.26s  ℓ=0.03046  σf²=1.954  σn²=0.469  cg(mean/trace)=122/121  mtot=43  M=1849
+   iter  14    0.26s  ℓ=0.02784  σf²=2.029  σn²=0.4628  cg(mean/trace)=111/116  mtot=43  M=1849
+   iter  15    0.30s  ℓ=0.02558  σf²=2.1  σn²=0.4617  cg(mean/trace)=137/125  mtot=43  M=1849
+ * iter  16    0.40s  ℓ=0.02339  σf²=2.172  σn²=0.4646  cg(mean/trace)=169/119  mtot=63  M=3969
+   iter  17    0.33s  ℓ=0.02136  σf²=2.243  σn²=0.4706  cg(mean/trace)=76/126  mtot=63  M=3969
+   iter  18    0.38s  ℓ=0.01954  σf²=2.31  σn²=0.4792  cg(mean/trace)=92/120  mtot=63  M=3969
+   iter  19    0.39s  ℓ=0.01798  σf²=2.368  σn²=0.4896  cg(mean/trace)=93/114  mtot=63  M=3969
+   iter  20    0.61s  ℓ=0.01666  σf²=2.417  σn²=0.5013  cg(mean/trace)=86/119  mtot=63  M=3969
+ * iter  21    0.77s  ℓ=0.01539  σf²=2.463  σn²=0.513  cg(mean/trace)=137/113  mtot=97  M=9409
+   iter  22    0.64s  ℓ=0.01423  σf²=2.501  σn²=0.5242  cg(mean/trace)=53/106  mtot=97  M=9409
+   iter  23    0.69s  ℓ=0.01323  σf²=2.528  σn²=0.5342  cg(mean/trace)=61/107  mtot=97  M=9409
+   iter  24    0.56s  ℓ=0.01239  σf²=2.542  σn²=0.5426  cg(mean/trace)=60/109  mtot=97  M=9409
+   iter  25    0.59s  ℓ=0.01171  σf²=2.541  σn²=0.549  cg(mean/trace)=58/109  mtot=97  M=9409
+ * iter  26    0.95s  ℓ=0.0111  σf²=2.529  σn²=0.5529  cg(mean/trace)=112/103  mtot=135  M=18225
+   iter  27    0.90s  ℓ=0.01057  σf²=2.505  σn²=0.5544  cg(mean/trace)=33/103  mtot=135  M=18225
+   iter  28    0.98s  ℓ=0.01013  σf²=2.47  σn²=0.5534  cg(mean/trace)=41/102  mtot=135  M=18225
+   iter  29    0.84s  ℓ=0.009794  σf²=2.422  σn²=0.5503  cg(mean/trace)=24/96  mtot=135  M=18225
+   iter  30    0.75s  ℓ=0.009561  σf²=2.363  σn²=0.5454  cg(mean/trace)=41/97  mtot=135  M=18225
+ * iter  31    1.27s  ℓ=0.009386  σf²=2.296  σn²=0.5389  cg(mean/trace)=104/99  mtot=167  M=27889
+   iter  32    1.14s  ℓ=0.00926  σf²=2.222  σn²=0.5314  cg(mean/trace)=17/94  mtot=167  M=27889
+   iter  33    1.23s  ℓ=0.009175  σf²=2.142  σn²=0.5234  cg(mean/trace)=18/96  mtot=167  M=27889
+   iter  34    1.01s  ℓ=0.009129  σf²=2.057  σn²=0.5152  cg(mean/trace)=18/96  mtot=167  M=27889
+   iter  35    1.00s  ℓ=0.009116  σf²=1.968  σn²=0.5074  cg(mean/trace)=15/93  mtot=167  M=27889
+ * iter  36    1.49s  ℓ=0.009129  σf²=1.876  σn²=0.5004  cg(mean/trace)=101/93  mtot=175  M=30625
+   iter  37    1.17s  ℓ=0.009156  σf²=1.783  σn²=0.4944  cg(mean/trace)=13/95  mtot=175  M=30625
+   iter  38    1.21s  ℓ=0.009191  σf²=1.69  σn²=0.4898  cg(mean/trace)=16/91  mtot=175  M=30625
+   iter  39    1.17s  ℓ=0.009225  σf²=1.596  σn²=0.4866  cg(mean/trace)=18/92  mtot=175  M=30625
+   iter  40    1.05s  ℓ=0.009253  σf²=1.503  σn²=0.4851  cg(mean/trace)=19/93  mtot=175  M=30625
+ * iter  41    1.34s  ℓ=0.009276  σf²=1.411  σn²=0.485  cg(mean/trace)=97/91  mtot=171  M=29241
+   iter  42    1.18s  ℓ=0.009284  σf²=1.321  σn²=0.4864  cg(mean/trace)=15/90  mtot=171  M=29241
+   iter  43    1.36s  ℓ=0.009276  σf²=1.233  σn²=0.4891  cg(mean/trace)=18/92  mtot=171  M=29241
+   iter  44    1.01s  ℓ=0.009248  σf²=1.148  σn²=0.4927  cg(mean/trace)=20/87  mtot=171  M=29241
+   iter  45    0.97s  ℓ=0.0092  σf²=1.066  σn²=0.4969  cg(mean/trace)=21/88  mtot=171  M=29241
+ * iter  46    1.29s  ℓ=0.009139  σf²=0.9867  σn²=0.5016  cg(mean/trace)=87/86  mtot=173  M=29929
+   iter  47    1.09s  ℓ=0.009062  σf²=0.9109  σn²=0.5062  cg(mean/trace)=18/86  mtot=173  M=29929
+   iter  48    1.15s  ℓ=0.008978  σf²=0.8386  σn²=0.5106  cg(mean/trace)=20/82  mtot=173  M=29929
+   iter  49    1.07s  ℓ=0.008881  σf²=0.7701  σn²=0.5144  cg(mean/trace)=22/78  mtot=173  M=29929
+   iter  50    0.86s  ℓ=0.008769  σf²=0.7055  σn²=0.5174  cg(mean/trace)=22/77  mtot=173  M=29929
+
+=== refresh_every_5_trace_warm  refresh_every=5 ===
+ * iter   1    0.17s  ℓ=0.0909  σf²=1.064  σn²=0.938  cg(mean/trace)=244/109  mtot=21  M=441
+   iter   2    0.14s  ℓ=0.08277  σf²=1.13  σn²=0.8784  cg(mean/trace)=197/38  mtot=21  M=441
+   iter   3    0.15s  ℓ=0.07553  σf²=1.197  σn²=0.8216  cg(mean/trace)=228/39  mtot=21  M=441
+   iter   4    0.17s  ℓ=0.06908  σf²=1.266  σn²=0.7677  cg(mean/trace)=218/57  mtot=21  M=441
+   iter   5    0.16s  ℓ=0.06337  σf²=1.337  σn²=0.7169  cg(mean/trace)=218/36  mtot=21  M=441
+ * iter   6    0.24s  ℓ=0.05795  σf²=1.411  σn²=0.6695  cg(mean/trace)=283/136  mtot=29  M=841
+   iter   7    0.16s  ℓ=0.05285  σf²=1.486  σn²=0.6257  cg(mean/trace)=170/36  mtot=29  M=841
+   iter   8    0.15s  ℓ=0.04818  σf²=1.563  σn²=0.5861  cg(mean/trace)=203/48  mtot=29  M=841
+   iter   9    0.18s  ℓ=0.044  σf²=1.64  σn²=0.5514  cg(mean/trace)=195/51  mtot=29  M=841
+   iter  10    0.18s  ℓ=0.04033  σf²=1.715  σn²=0.5223  cg(mean/trace)=207/51  mtot=29  M=841
+ * iter  11    0.32s  ℓ=0.03681  σf²=1.794  σn²=0.4986  cg(mean/trace)=201/125  mtot=43  M=1849
+   iter  12    0.19s  ℓ=0.03352  σf²=1.875  σn²=0.4809  cg(mean/trace)=117/36  mtot=43  M=1849
+   iter  13    0.20s  ℓ=0.03053  σf²=1.954  σn²=0.469  cg(mean/trace)=119/48  mtot=43  M=1849
+   iter  14    0.21s  ℓ=0.0279  σf²=2.029  σn²=0.4629  cg(mean/trace)=134/35  mtot=43  M=1849
+   iter  15    0.23s  ℓ=0.02564  σf²=2.1  σn²=0.4618  cg(mean/trace)=102/55  mtot=43  M=1849
+ * iter  16    0.40s  ℓ=0.02345  σf²=2.172  σn²=0.4646  cg(mean/trace)=169/126  mtot=63  M=3969
+   iter  17    0.24s  ℓ=0.02141  σf²=2.243  σn²=0.4707  cg(mean/trace)=76/37  mtot=63  M=3969
+   iter  18    0.50s  ℓ=0.01959  σf²=2.309  σn²=0.4793  cg(mean/trace)=106/49  mtot=63  M=3969
+   iter  19    0.18s  ℓ=0.01803  σf²=2.367  σn²=0.4897  cg(mean/trace)=68/52  mtot=63  M=3969
+   iter  20    0.24s  ℓ=0.01671  σf²=2.416  σn²=0.5013  cg(mean/trace)=94/42  mtot=63  M=3969
+ * iter  21    0.72s  ℓ=0.01544  σf²=2.461  σn²=0.5131  cg(mean/trace)=139/110  mtot=95  M=9025
+   iter  22    0.29s  ℓ=0.0143  σf²=2.499  σn²=0.5243  cg(mean/trace)=52/35  mtot=95  M=9025
+   iter  23    0.39s  ℓ=0.01331  σf²=2.526  σn²=0.5343  cg(mean/trace)=60/43  mtot=95  M=9025
+   iter  24    0.30s  ℓ=0.0125  σf²=2.54  σn²=0.5427  cg(mean/trace)=60/44  mtot=95  M=9025
+   iter  25    0.36s  ℓ=0.01185  σf²=2.539  σn²=0.5492  cg(mean/trace)=48/38  mtot=95  M=9025
+ * iter  26    1.15s  ℓ=0.01125  σf²=2.528  σn²=0.5532  cg(mean/trace)=111/106  mtot=135  M=18225
+   iter  27    0.39s  ℓ=0.01072  σf²=2.505  σn²=0.5547  cg(mean/trace)=32/28  mtot=135  M=18225
+   iter  28    0.54s  ℓ=0.01028  σf²=2.471  σn²=0.5538  cg(mean/trace)=40/34  mtot=135  M=18225
+   iter  29    0.42s  ℓ=0.009929  σf²=2.425  σn²=0.5507  cg(mean/trace)=40/30  mtot=135  M=18225
+   iter  30    0.36s  ℓ=0.009679  σf²=2.368  σn²=0.5457  cg(mean/trace)=20/30  mtot=135  M=18225
+ * iter  31    1.47s  ℓ=0.009481  σf²=2.303  σn²=0.5393  cg(mean/trace)=104/98  mtot=165  M=27225
+   iter  32    0.29s  ℓ=0.009333  σf²=2.231  σn²=0.5318  cg(mean/trace)=18/17  mtot=165  M=27225
+   iter  33    0.39s  ℓ=0.009232  σf²=2.152  σn²=0.5237  cg(mean/trace)=19/19  mtot=165  M=27225
+   iter  34    0.33s  ℓ=0.009173  σf²=2.067  σn²=0.5156  cg(mean/trace)=18/19  mtot=165  M=27225
+   iter  35    0.27s  ℓ=0.009149  σf²=1.979  σn²=0.5077  cg(mean/trace)=17/12  mtot=165  M=27225
+ * iter  36    1.61s  ℓ=0.009153  σf²=1.888  σn²=0.5006  cg(mean/trace)=99/92  mtot=173  M=29929
+   iter  37    0.29s  ℓ=0.009179  σf²=1.795  σn²=0.4946  cg(mean/trace)=14/14  mtot=173  M=29929
+   iter  38    0.37s  ℓ=0.009218  σf²=1.702  σn²=0.4899  cg(mean/trace)=16/19  mtot=173  M=29929
+   iter  39    0.44s  ℓ=0.009262  σf²=1.608  σn²=0.4867  cg(mean/trace)=18/21  mtot=173  M=29929
+   iter  40    0.34s  ℓ=0.009305  σf²=1.515  σn²=0.4851  cg(mean/trace)=20/23  mtot=173  M=29929
+ * iter  41    1.79s  ℓ=0.009337  σf²=1.423  σn²=0.485  cg(mean/trace)=97/93  mtot=171  M=29241
+   iter  42    0.34s  ℓ=0.009355  σf²=1.334  σn²=0.4864  cg(mean/trace)=15/18  mtot=171  M=29241
+   iter  43    0.42s  ℓ=0.009355  σf²=1.246  σn²=0.489  cg(mean/trace)=18/23  mtot=171  M=29241
+   iter  44    0.33s  ℓ=0.009335  σf²=1.162  σn²=0.4926  cg(mean/trace)=20/24  mtot=171  M=29241
+   iter  45    0.45s  ℓ=0.009295  σf²=1.08  σn²=0.4968  cg(mean/trace)=20/23  mtot=171  M=29241
+ * iter  46    0.45s  ℓ=0.009236  σf²=1.002  σn²=0.5015  cg(mean/trace)=28/25  mtot=171  M=29241
+   iter  47    0.44s  ℓ=0.00916  σf²=0.9266  σn²=0.5061  cg(mean/trace)=19/25  mtot=171  M=29241
+   iter  48    0.43s  ℓ=0.009069  σf²=0.855  σn²=0.5105  cg(mean/trace)=23/25  mtot=171  M=29241
+   iter  49    0.39s  ℓ=0.008965  σf²=0.7871  σn²=0.5144  cg(mean/trace)=23/27  mtot=171  M=29241
+   iter  50    0.50s  ℓ=0.008851  σf²=0.723  σn²=0.5174  cg(mean/trace)=23/28  mtot=171  M=29241
+
+Wrote /Users/colecitrenbaum/Documents/GPs/gp-quadrature/scratch/bench_lst_warmstart.json

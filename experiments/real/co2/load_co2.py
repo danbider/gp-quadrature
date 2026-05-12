@@ -8,10 +8,32 @@ co2_xs.bin   — N×2 float64 array of (latitude, longitude) on disk
 co2_meas.bin — N float64 array of CO2 concentration (ppm)
 """
 
-import os
+from pathlib import Path
 import numpy as np
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "co2_data")
+_MODULE_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _MODULE_DIR.parents[2]
+_SEARCH_DIRS = (
+    _MODULE_DIR / "data",
+    _MODULE_DIR / "co2_data",
+    _MODULE_DIR,
+    _REPO_ROOT / "co2_data",
+)
+
+
+def _resolve_data_dir():
+    tried = []
+    for base in _SEARCH_DIRS:
+        if (base / "co2_meas.bin").exists() and (base / "co2_xs.bin").exists():
+            return base
+        tried.append(str(base))
+    raise FileNotFoundError(
+        "CO2 dataset (co2_meas.bin, co2_xs.bin) not found. Looked in:\n  "
+        + "\n  ".join(tried)
+    )
+
+
+DATA_DIR = _resolve_data_dir()
 
 
 def load_co2(n_sub=None, seed=0, lonlat=True):
@@ -36,8 +58,8 @@ def load_co2(n_sub=None, seed=0, lonlat=True):
     meas : ndarray, shape (N,)
         CO2 concentration in ppm.
     """
-    meas_path = os.path.join(DATA_DIR, "co2_meas.bin")
-    xs_path = os.path.join(DATA_DIR, "co2_xs.bin")
+    meas_path = DATA_DIR / "co2_meas.bin"
+    xs_path = DATA_DIR / "co2_xs.bin"
 
     meas = np.fromfile(meas_path, dtype=np.float64)
     N = meas.shape[0]

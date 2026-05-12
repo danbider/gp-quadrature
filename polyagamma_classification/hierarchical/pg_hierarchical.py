@@ -182,14 +182,14 @@ def _build_per_location_toeplitz(
     # Global T_all from all points
     w_all = delta.to(dtype=cdtype, device=delta.device).flatten()
     v_all = spec.nufft_global.type1(w_all, out_shape=conv_shape)
-    T_all = ToeplitzND(v_all.to(dtype=cdtype), force_pow2=True)
+    T_all = ToeplitzND(v_all.to(dtype=cdtype), force_pow2=False)
 
     # Per-location
     T_loc: list[ToeplitzND] = []
     for ell, idx in enumerate(spec.loc_indices):
         w_ell = delta[idx].to(dtype=cdtype, device=delta.device).flatten()
         v_ell = spec.nufft_local[ell].type1(w_ell, out_shape=conv_shape)
-        T_loc.append(ToeplitzND(v_ell.to(dtype=cdtype), force_pow2=True))
+        T_loc.append(ToeplitzND(v_ell.to(dtype=cdtype), force_pow2=False))
 
     return T_all, T_loc
 

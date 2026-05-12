@@ -1,0 +1,53 @@
+SVD-of-v Kron preconditioner bench, eps=1e-3, cg_tol=1e-4, K=3
+
+Loading ERA5 t2m...
+  N=1,038,240 in 0.3s
+
+=== ERA5 t2m: N=1,038,240, d=2 ===
+
+  (ℓ=0.02, σ_f²=1.0, σ²=0.01)
+    jacobi        : 0.20s  cg=26  M=6561
+    kron (plain)  : 0.17s  cg=2
+    SVDkron r=1    : 0.17s  cg=8  ||V_r||/||V||=1.0000
+    SVDkron r=3    : 0.18s  cg=8  ||V_r||/||V||=1.0000
+    SVDkron r=10   : 0.17s  cg=8  ||V_r||/||V||=1.0000
+
+  (ℓ=0.01, σ_f²=1.0, σ²=0.01)
+    jacobi        : 0.31s  cg=21  M=25281
+    kron (plain)  : 0.21s  cg=2
+    SVDkron r=1    : 0.28s  cg=4  ||V_r||/||V||=1.0000
+    SVDkron r=3    : 0.27s  cg=4  ||V_r||/||V||=1.0000
+    SVDkron r=10   : 0.28s  cg=4  ||V_r||/||V||=1.0000
+
+Loading PRISM tmean (sub 1M)...
+  N=1,000,000 in 1.3s
+
+=== PRISM tmean (sub 1M): N=1,000,000, d=2 ===
+
+  (ℓ=0.02, σ_f²=1.0, σ²=0.01)
+    jacobi        : 0.18s  cg=46  M=6561
+    kron (plain)  : 0.76s  cg=155
+    SVDkron r=1    : 0.72s  cg=175  ||V_r||/||V||=0.9127
+    SVDkron r=3    : 0.72s  cg=173  ||V_r||/||V||=0.9555
+    SVDkron r=10   : 0.60s  cg=137  ||V_r||/||V||=0.9856
+
+  (ℓ=0.01, σ_f²=1.0, σ²=0.01)
+    jacobi        : 0.52s  cg=51  M=25281
+    kron (plain)  : 2.39s  cg=208
+    SVDkron r=1    : 3.10s  cg=238  ||V_r||/||V||=0.8947
+    SVDkron r=3    : 2.80s  cg=245  ||V_r||/||V||=0.9369
+    SVDkron r=10   : 2.44s  cg=205  ||V_r||/||V||=0.9671
+
+Loading OISST anom...
+  N=691,150 in 0.1s
+
+=== OISST anom: N=691,150, d=2 ===
+
+  (ℓ=0.02, σ_f²=1.0, σ²=0.01)
+    jacobi        : 0.23s  cg=56  M=6561
+    kron (plain)  : 0.42s  cg=101
+    SVDkron r=1    : 0.45s  cg=103  ||V_r||/||V||=0.9037
+    SVDkron r=3    : 0.49s  cg=100  ||V_r||/||V||=0.9496
+    SVDkron r=10   : 0.51s  cg=118  ||V_r||/||V||=0.9825
+
+wrote -> /Users/colecitrenbaum/Documents/GPs/gp-quadrature/scratch/bench_svd_vkernel.json

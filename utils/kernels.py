@@ -1,4 +1,5 @@
-from typing import Tuple, Union, Optional
+from copy import deepcopy
+from typing import List, Tuple, Union, Optional, Sequence
 import torch
 from kernels.matern import Matern
 from kernels.squared_exponential import SquaredExponential
@@ -139,5 +140,75 @@ def get_xis(kernel_obj: Union[Matern, SquaredExponential], eps: float, L: int, u
 
 
     mtot = xis.numel()  # 2m+1
-    
+
     return xis, h_spacing, mtot
+
+
+def get_xis_per_dim(
+    kernel_obj,
+    eps: float,
+    L_per_dim: Sequence[float],
+    lengthscales: Sequence[float],
+    *,
+    use_integral: bool = True,
+    l2scaled: bool = False,
+    dtype: torch.dtype = torch.float64,
+    trunc_eps: Optional[float] = None,
+) -> Tuple[List[torch.Tensor], torch.Tensor, List[int]]:
+    """Per-dimension wrapper around ``get_xis``.
+
+    For each axis ``k``, build a 1D copy of the kernel with
+    ``lengthscale = lengthscales[k]`` and call ``get_xis`` with
+    ``L = L_per_dim[k]``. Returns parallel lists of 1D nodes, spacings,
+    and node counts — one entry per spatial dimension.
+
+    Parameters
+    ----------
+    kernel_obj : Kernel
+        Reference kernel; only its type/variance are used. We deep-copy it
+        and overwrite ``lengthscale`` for each axis.
+    eps : float
+        Tolerance, passed through to ``get_xis``.
+    L_per_dim : sequence of float
+        Spatial extent (``x.max - x.min``) per dimension.
+    lengthscales : sequence of float
+        Per-dimension lengthscale to use for sizing each axis.
+    """
+    if len(L_per_dim) != len(lengthscales):
+        raise ValueError(
+            f"L_per_dim and lengthscales must have same length, got "
+            f"{len(L_per_dim)} and {len(lengthscales)}"
+        )
+
+    # Build a 1D-isotropic stand-in kernel for each axis. We use
+    # SquaredExponential or Matern depending on the input type so that
+    # get_xis routes to the right heuristic when use_integral=False.
+    base_variance = float(kernel_obj.get_hyper('variance'))
+    if isinstance(kernel_obj, Matern):
+        proxy_factory = lambda l: Matern(
+            dimension=1, nu=kernel_obj.nu,
+            init_lengthscale=float(l), init_variance=base_variance,
+        )
+    else:
+        # Default to SquaredExponential proxy. ARD-SE is treated as a product
+        # of 1D SE factors per axis.
+        proxy_factory = lambda l: SquaredExponential(
+            dimension=1, init_lengthscale=float(l), init_variance=base_variance,
+        )
+
+    xis_1d_list: List[torch.Tensor] = []
+    h_list: List[float] = []
+    mtot_list: List[int] = []
+    for k, (L_k, l_k) in enumerate(zip(L_per_dim, lengthscales)):
+        proxy = proxy_factory(l_k)
+        xis_k, h_k, mtot_k = get_xis(
+            proxy, eps=eps, L=float(L_k),
+            use_integral=use_integral, l2scaled=l2scaled,
+            dtype=dtype, trunc_eps=trunc_eps,
+        )
+        xis_1d_list.append(xis_k)
+        h_list.append(float(h_k))
+        mtot_list.append(int(mtot_k))
+
+    h_per_dim = torch.tensor(h_list, dtype=dtype)
+    return xis_1d_list, h_per_dim, mtot_list

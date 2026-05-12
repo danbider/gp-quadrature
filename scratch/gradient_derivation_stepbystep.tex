@@ -1,0 +1,336 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm,algpseudocode}
+\usepackage[margin=1in]{geometry}
+\usepackage[colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black]{hyperref}
+
+\numberwithin{equation}{section}
+
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\bigo}{\mathcal{O}}
+\newcommand{\Ktil}{\widetilde K}
+\newcommand{\Amean}{A}
+
+\title{EFGP log-marginal gradient: a step-by-step derivation}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\noindent This note derives the EFGP gradient algorithm from scratch. The target
+form, which we call the \emph{$\beta$-form}, avoids a $1/\sigma^2$ amplification
+of the CG residual that appears in the naive Woodbury expansion. The derivation
+is linear: each section uses only what was established in the previous one.
+
+\section{Step 1. The log-marginal and its gradient}
+
+Let $K_\theta\in\mathbb{R}^{N\times N}$ be the kernel Gram matrix, $\sigma^2$ the
+observation noise, and $\Ktil := K_\theta + \sigma^2 I$. The Gaussian
+log-marginal is
+\[
+  \log p(y\mid\theta) \;=\; -\tfrac12\,y^\top \Ktil^{-1}y
+                          \;-\; \tfrac12\,\log\det\Ktil + \text{const}.
+\]
+For any scalar hyper $\theta$ (a kernel parameter such as lengthscale or
+variance, or the noise $\sigma^2$ itself), the two standard identities
+$\partial_\theta\log\det\Ktil = \tr(\Ktil^{-1}\partial_\theta\Ktil)$ and
+$\partial_\theta\Ktil^{-1} = -\Ktil^{-1}(\partial_\theta\Ktil)\Ktil^{-1}$ give
+\begin{equation}
+  \partial_\theta\log p \;=\; \tfrac12\bigl(T_2 - T_1\bigr),\qquad
+  T_2 \;=\; y^\top \Ktil^{-1}(\partial_\theta\Ktil)\,\Ktil^{-1}y,\qquad
+  T_1 \;=\; \tr\!\bigl(\Ktil^{-1}\partial_\theta\Ktil\bigr).
+  \label{eq:gradient}
+\end{equation}
+Writing $\alpha := \Ktil^{-1}y$,
+\begin{equation}
+  T_2 \;=\; \alpha^\top(\partial_\theta\Ktil)\,\alpha. \label{eq:T2alpha}
+\end{equation}
+So we need two primitives: a single solve $\alpha = \Ktil^{-1}y$ (for $T_2$), and
+a trace of $\Ktil^{-1}\partial_\theta\Ktil$ (for $T_1$).
+For kernel hypers $\partial_\theta\Ktil = \partial_\theta K$; for noise
+$\partial_{\sigma^2}\Ktil = I$.
+
+\paragraph{The obstacle.} Both $T_1$ and $T_2$ contain $\Ktil^{-1}$, an $N\times
+N$ dense inverse. A direct solve is $\bigo(N^3)$; the trace is worse. To make
+these tractable we need structure in $K$.
+
+\section{Step 2. The EFGP factorization}
+
+Fix an equispaced frequency grid $\{\xi_k\}_{k=1}^M\subset\mathbb{R}^d$ with
+spacing $h$, chosen to resolve the kernel spectrum to tolerance $\varepsilon$.
+Define
+\begin{equation}
+  F\in\mathbb{C}^{N\times M},\quad F_{j,k} = e^{i2\pi x_j\cdot\xi_k},\qquad
+  D = \operatorname{diag}\!\bigl(\sqrt{h^d\,\hat k_\theta(\xi_k)}\bigr),\qquad
+  \Phi := FD.
+\end{equation}
+Quadrature on the kernel Bochner integral gives the two approximations we need:
+\begin{equation}
+  K_\theta \;\approx\; \Phi\Phi^* \;=\; FD^2F^*,\qquad
+  \partial_\theta K_\theta \;\approx\; F\,D'_\theta\,F^*,\qquad
+  D'_\theta := \operatorname{diag}\!\bigl(h^d\,\partial_\theta\hat k_\theta(\xi_k)\bigr).
+  \label{eq:efgp}
+\end{equation}
+Both approximations share the \emph{same} $F$; only the spectral diagonal
+changes. This is the structural fact that will let us reduce every $N$-space
+expression to an $M$-space expression.
+
+Two auxiliary $M\times M$ operators appear repeatedly:
+\begin{equation}
+  T \;:=\; F^*F\quad(\text{multi-level Toeplitz, $\bigo(M\log M)$ matvec}),\qquad
+  \Amean \;:=\; \sigma^2 I + DTD \;=\; \sigma^2 I + \Phi^*\Phi.
+  \label{eq:AT}
+\end{equation}
+We will apply CG only against $\Amean$, never against the $N\times N$ $\Ktil$.
+
+\section{Step 3. Solving the mean: Woodbury moves the inverse to $M$-space}
+
+Because $\Ktil = \sigma^2 I + \Phi\Phi^*$ is a rank-$M$ update of a diagonal, the
+Sherman--Morrison--Woodbury identity applies directly:
+\begin{equation}
+  \Ktil^{-1}
+  \;=\; \sigma^{-2}\!\left(I - \Phi\,(\sigma^2 I + \Phi^*\Phi)^{-1}\,\Phi^*\right)
+  \;=\; \sigma^{-2}\!\left(I - \Phi\,\Amean^{-1}\,\Phi^*\right).
+  \label{eq:woodbury}
+\end{equation}
+Applying both sides to $y$,
+\begin{equation}
+  \alpha \;=\; \Ktil^{-1}y \;=\; \sigma^{-2}\bigl(y - \Phi\beta_0\bigr)
+                       \;=\; \sigma^{-2}\bigl(y - FD\beta_0\bigr),\qquad
+  \beta_0 \;:=\; \Amean^{-1}\,DF^*y.
+  \label{eq:alpha_beta0}
+\end{equation}
+This reduces the mean to one NUFFT ($z := F^*y$) followed by one $M$-space CG
+solve ($\Amean\beta_0 = Dz$).
+
+\paragraph{A useful reorganization.} The equation defining $\beta_0$,
+$\Amean\beta_0 = DF^*y$, expands (using $\Amean = \sigma^2 I + DTD$) as
+$\sigma^2\beta_0 + DTD\beta_0 = DF^*y$. Rearrange:
+\begin{equation}
+  D\bigl(F^*y - T\,D\beta_0\bigr) \;=\; \sigma^2\beta_0.
+  \label{eq:mean_rearrange}
+\end{equation}
+Separately, applying $F^*$ to \eqref{eq:alpha_beta0} and using $T = F^*F$
+(eq.~\eqref{eq:AT}):
+\begin{equation}
+  F^*\alpha \;=\; \sigma^{-2}\bigl(F^*y - T\,D\beta_0\bigr).
+  \label{eq:Fadj_alpha}
+\end{equation}
+Multiplying \eqref{eq:Fadj_alpha} by $D$ and comparing with
+\eqref{eq:mean_rearrange}: $\sigma^2\,DF^*\alpha = D(F^*y - TD\beta_0) =
+\sigma^2\beta_0$, so
+\begin{equation}
+  \boxed{\;D\,F^*\alpha \;=\; \beta_0\;}\qquad\text{(exactly, at CG convergence)}.
+  \label{eq:key_mean}
+\end{equation}
+Equivalently, $F^*\alpha = \beta_0/D$ entrywise on $\operatorname{supp}(D)$.
+This identity is the reason the $\beta$-form exists: the quantity $F^*\alpha$,
+which would otherwise require a $\sigma^{-2}$-amplified combination of $F^*y$
+and $T(D\beta_0)$, is already sitting in memory as $\beta_0$ --- up to a
+pointwise division by $D$.
+
+\section{Step 4. $T_2$ in $M$-space}
+
+\subsection*{Kernel hypers}
+
+Substitute \eqref{eq:efgp} into \eqref{eq:T2alpha}:
+\begin{equation}
+  T_2(\theta) \;=\; \alpha^*\bigl(F\,D'_\theta\,F^*\bigr)\alpha
+              \;=\; \langle F^*\alpha,\; D'_\theta\,F^*\alpha\rangle.
+  \label{eq:T2_Fform}
+\end{equation}
+We now have two algebraically equivalent routes.
+
+\paragraph{Route A (naive Woodbury / residual form).} Use
+eq.~\eqref{eq:Fadj_alpha} literally, $F^*\alpha = \sigma^{-2}(F^*y - TD\beta_0)$.
+Every evaluation carries a $\sigma^{-2}$ prefactor. Under an inexact CG solve
+with residual $r := \Amean\beta_0 - DF^*y$, the quantity evaluated is
+$F^*\alpha + r/(\sigma^2 D)$ (on the $D$-support). Because
+\eqref{eq:T2_Fform} is \emph{quadratic} in $F^*\alpha$, the error contains a
+$\|r\|^2/\sigma^4$ term that can flip the sign of the gradient when $\sigma^2$
+is small.
+
+\paragraph{Route B (the $\beta$-form).} Use the identity \eqref{eq:key_mean}:
+$F^*\alpha = \beta_0/D$. Then \eqref{eq:T2_Fform} becomes
+\begin{equation}
+  \boxed{\;T_2(\theta) \;=\; \bigl\langle \beta_0,\; (D'_\theta/|D|^2)\,\beta_0\bigr\rangle.\;}
+  \label{eq:T2beta}
+\end{equation}
+This uses only the CG output $\beta_0$. Under inexact CG the error in $\beta_0$
+enters linearly (through a single factor of $\beta_0$ on each side of the inner
+product), with no $1/\sigma$ prefactor. The $1/|D|^2$ weight is bounded on the
+EFGP grid by construction (the grid is truncated where $\hat k(\xi)$ falls
+below $\varepsilon$).
+
+\subsection*{Noise}
+
+Since $\partial_{\sigma^2}\Ktil = I$, we have $T_2(\sigma^2) = \|\alpha\|^2$.
+Expanding the defining relation $\sigma^2\alpha = y - FD\beta_0$ directly,
+\begin{equation}
+  \boxed{\;\|\alpha\|^2 \;=\; \sigma^{-4}\bigl(\|y\|^2 - 2\,\Re\langle\beta_0,\,DF^*y\rangle + \langle\beta_0,\,DTD\,\beta_0\rangle\bigr).\;}
+  \label{eq:T2noise}
+\end{equation}
+Crucially this expansion does \emph{not} invoke
+$\Amean\beta_0 = DF^*y$, so it is CG-robust: all three scalars are $M$-dots on
+vectors already computed during the mean solve ($F^*y$, $D\beta_0$,
+$T(D\beta_0)$).
+
+\subsection*{Variance $\sigma_f^2$ (closed form)}
+
+For SE/Mat\'ern kernels, $\hat k$ is linear in $\sigma_f^2$, so
+$D^2 = \sigma_f^2\cdot(\text{shape})$ and $D'_{\sigma_f^2} = D^2/\sigma_f^2$.
+Substituting into \eqref{eq:T2beta}:
+\[
+  T_2(\sigma_f^2) \;=\; \|\beta_0\|^2/\sigma_f^2.
+\]
+
+\section{Step 5. $T_1$: trace in $M$-space}
+
+\subsection*{Kernel hypers}
+
+By cyclicity of trace and \eqref{eq:efgp},
+\begin{equation}
+  T_1(\theta) \;=\; \tr\!\bigl(\Ktil^{-1}\,F D'_\theta F^*\bigr)
+              \;=\; \tr\!\bigl(F^*\Ktil^{-1}F\,\cdot\,D'_\theta\bigr)
+              \;=\; \tr\!\bigl(B\,D'_\theta\bigr),\qquad
+  B \;:=\; F^*\,\Ktil^{-1}\,F \;\in\;\mathbb{C}^{M\times M}.
+  \label{eq:Bdef}
+\end{equation}
+The trace has moved into $M$-space. Now apply Woodbury \eqref{eq:woodbury} to
+expand $B$:
+\begin{equation}
+  B \;=\; \sigma^{-2}\bigl(F^*F - F^*\Phi\,\Amean^{-1}\,\Phi^*F\bigr)
+     \;=\; \sigma^{-2}\bigl(T - T D\,\Amean^{-1}\,D T\bigr).
+  \label{eq:Bform}
+\end{equation}
+
+\paragraph{Hutchinson.} For a Rademacher probe $v\in\{\pm1\}^M$,
+$\mathbb{E}_v[v^*\,BD'_\theta\,v] = \tr(BD'_\theta) = T_1(\theta)$. Let
+\[
+  u^\theta \;:=\; D'_\theta\,v,\qquad
+  X^\theta \;:=\; \Amean^{-1}\bigl(D T u^\theta\bigr).
+\]
+Then \eqref{eq:Bform} gives
+\begin{equation}
+  B\,D'_\theta\,v \;=\; \sigma^{-2}\bigl(T u^\theta - T D\,X^\theta\bigr).
+  \label{eq:BDv}
+\end{equation}
+
+\paragraph{Route A (naive Woodbury).} Evaluate \eqref{eq:BDv} literally and
+inner-product with $v$. The $\sigma^{-2}$ prefactor amplifies the CG residual of
+$X^\theta$.
+
+\paragraph{Route B (the $\beta$-form).} Apply the same reorganization as in
+Step~3 to the defining equation $\Amean X^\theta = DTu^\theta$:
+\begin{equation}
+  \sigma^2 X^\theta + DTD\,X^\theta \;=\; DT u^\theta
+  \quad\Longrightarrow\quad
+  D\bigl(T u^\theta - T D\,X^\theta\bigr) \;=\; \sigma^2\,X^\theta.
+  \label{eq:trace_rearrange}
+\end{equation}
+Multiplying \eqref{eq:BDv} by $\sigma^2 D$ and comparing with
+\eqref{eq:trace_rearrange}: $\sigma^2\,D\,BD'_\theta v = D(Tu^\theta -
+TDX^\theta) = \sigma^2 X^\theta$, so
+\begin{equation}
+  \boxed{\;B\,D'_\theta\,v \;=\; X^\theta/D\;}\qquad\text{(exactly, at CG convergence)}.
+  \label{eq:key_trace}
+\end{equation}
+Substituting \eqref{eq:key_trace} into the Hutchinson estimator,
+\begin{equation}
+  T_1(\theta) \;\approx\; \frac{1}{J}\sum_{j=1}^{J}\bigl\langle v_j,\; B D'_\theta v_j\bigr\rangle
+              \;=\; \frac{1}{J}\sum_{j=1}^{J}\bigl\langle v_j,\; X^\theta_j/D\bigr\rangle.
+  \label{eq:T1beta}
+\end{equation}
+One batched CG solve against $\Amean$ produces the $\{X^\theta_j\}$; the rest
+is a Hadamard divide and an inner product. No NUFFT and no Toeplitz application
+enter \eqref{eq:T1beta} after the right-hand side is formed.
+
+\paragraph{Why this is lower-variance than a naive $N$-space Hutchinson.}
+A data-space Hutchinson estimator $z^*\Ktil^{-1}(\partial_\theta K)z$ with
+$z\in\{\pm1\}^N$ has its Hutchinson variance proportional to the squared
+Frobenius norm of the off-diagonal of $\Ktil^{-1}\partial_\theta K$. The same
+trace in $M$-space is $v^*\,BD'_\theta\,v$ with $v\in\{\pm1\}^M$, and
+$BD'_\theta$ is $M\times M$. Since $\partial_\theta K \approx FD'_\theta F^*$
+has rank at most $M$ by construction, the $N\!-\!M$ directions where the
+$N$-space matrix acts trivially still contribute Hutchinson variance. The
+$M$-space probe sees only the informative subspace: single-probe variance drops
+by roughly the rank ratio $M/N$.
+
+\subsection*{Noise}
+
+From Woodbury \eqref{eq:woodbury} applied to the trace,
+\begin{equation}
+  T_1(\sigma^2) \;=\; \tr(\Ktil^{-1})
+           \;=\; \sigma^{-2}\bigl(N - \tr(\Amean^{-1}\,DTD)\bigr),
+  \label{eq:T1noise}
+\end{equation}
+with the $M$-space trace estimated by Hutchinson on $\Amean^{-1}DTD$ using
+probes $V_n\in\{\pm1\}^{M\times J}$ solved in the same batched CG.
+
+\subsection*{Variance $\sigma_f^2$ (closed form)}
+
+Since $K_\theta = \sigma_f^2\cdot\partial_{\sigma_f^2}K_\theta$,
+\[
+  T_1(\sigma_f^2) \;=\; \frac{1}{\sigma_f^2}\,\tr(\Ktil^{-1}K)
+              \;=\; \frac{N - \sigma^2\,T_1(\sigma^2)}{\sigma_f^2}.
+\]
+No separate Hutchinson call.
+
+\section{Step 6. Why the $\beta$-form everywhere}
+
+Both $T_2$ and $T_1$ land on the same structural choice: to express the needed
+quantity ($F^*\alpha$ or $BD'_\theta v$), either
+\begin{itemize}
+  \item[(A)] evaluate the Woodbury expression literally, which carries a
+    $\sigma^{-2}$ prefactor on the CG residual; or
+  \item[(B)] apply the reorganization $D\cdot(\text{Woodbury expression}) =
+    \sigma^2\cdot(\text{CG output})$ and divide by $D$.
+\end{itemize}
+The two are algebraically identical at CG convergence. Under inexact CG with
+residual $\delta$, Route~A contributes $\|\delta\|/\sigma^2$; in $T_2$, where
+this sits on \emph{both sides} of a quadratic form, it becomes
+$\|\delta\|^2/\sigma^4$ and can flip the gradient sign at small $\sigma^2$.
+Route~B replaces the $1/\sigma^2$ amplification with a $1/D$ division that is
+bounded on the EFGP grid (the grid is truncated where
+$\hat k(\xi) < \varepsilon$, so $|D|^2 \gtrsim \varepsilon$, and the amplification
+is $\bigo(1/\varepsilon)$ rather than $\bigo(1/\sigma^2)$).
+This is the entire motivation for the $\beta$-form.
+
+\section{Step 7. Algorithm}
+
+Let $\theta_1,\dots,\theta_{K-1}$ be the kernel hypers excluding $\sigma_f^2$.
+Precompute $F$, $D$, $\{D'_{\theta_i}\}$, and a Jacobi preconditioner for
+$\Amean$.
+
+\begin{algorithm}[h]
+\caption{EFGP log-marginal gradient: one NUFFT, two CG calls.}
+\begin{algorithmic}[1]
+\State $z \leftarrow F^*y$ \Comment{\textbf{only NUFFT in the whole gradient}}
+\State Solve $\Amean\,\beta_0 = D z$ by CG. \hfill\textbf{(CG \#1, mean)}
+\State $w \leftarrow T(D\beta_0)$ \Comment{Toeplitz matvec, reused}
+\Statex\hrulefill
+\State \emph{Term $T_2$ (all $M$-space, Route B where relevant):}
+\State \quad kernel hypers: $T_2(\theta_i) \leftarrow \langle\beta_0,\,(D'_{\theta_i}/|D|^2)\,\beta_0\rangle$  \hfill [eq.~\eqref{eq:T2beta}]
+\State \quad variance:      $T_2(\sigma_f^2) \leftarrow \|\beta_0\|^2/\sigma_f^2$
+\State \quad noise:         $T_2(\sigma^2) \leftarrow \sigma^{-4}\bigl(\|y\|^2 - 2\,\Re\langle\beta_0, Dz\rangle + \langle\beta_0, Dw\rangle\bigr)$ \hfill [eq.~\eqref{eq:T2noise}]
+\Statex\hrulefill
+\State \emph{Term $T_1$:} draw $V\in\{\pm1\}^{M\times J}$, $V_n\in\{\pm1\}^{M\times J}$.
+\State \quad kernel: for each $\theta_i$, $\mathrm{rhs}^i \leftarrow D\,T\,(D'_{\theta_i}V)$
+\State \quad noise:  $\mathrm{rhs}^n \leftarrow D\,T\,(D V_n)$
+\State \quad stack RHSs; solve $\Amean X = \mathrm{rhs}$ by batched CG. \hfill\textbf{(CG \#2, trace)}
+\State \quad kernel ($\beta$-form): $T_1(\theta_i) \leftarrow \mathrm{mean}_j\,\langle V_j,\,X^i_j/D\rangle$  \hfill [eq.~\eqref{eq:T1beta}]
+\State \quad noise:  $T_1(\sigma^2) \leftarrow \sigma^{-2}\bigl(N - \mathrm{mean}_j\,\langle (V_n)_j,\,X^n_j\rangle\bigr)$  \hfill [eq.~\eqref{eq:T1noise}]
+\State \quad variance: $T_1(\sigma_f^2) \leftarrow (N - \sigma^2\,T_1(\sigma^2))/\sigma_f^2$
+\Statex\hrulefill
+\State \textbf{Return} $\nabla_\theta\log p = \tfrac12(T_2 - T_1)$ for each hyper.
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Complexity.} One NUFFT ($\bigo(N + M\log M)$). Two CG calls against
+$\Amean$, each $\bigo(M\log M)$ per matvec: the mean with one RHS, the trace
+with $(K\!-\!1)\!+\!1 = K$ blocks of $J$ RHSs stacked. All $T_2$ work is
+$\bigo(KM)$. No NUFFT and no $N$-space linear algebra appear inside the trace
+loop.
+
+\end{document}

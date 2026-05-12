@@ -1,0 +1,383 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm,algpseudocode}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\bigo}{\mathcal{O}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\kron}{\otimes}
+
+\title{A Kronecker preconditioner for the EFGP normal equations}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{The system being preconditioned}
+
+In the EFGP gradient path (see \texttt{efgpnd.py::efgpnd\_gradient\_batched}), each
+hyper step requires solving
+\begin{equation}
+  A\,\beta \;=\; b, \qquad
+  A \;=\; D\,T\,D + \sigma^2 I \;\in\; \mathbb{C}^{M\times M},
+  \label{eq:A}
+\end{equation}
+where $M = m^d$ is the number of Fourier nodes on a $d$-dimensional tensor
+grid, $D = \diag(w)$ with $w_j = \sqrt{\hat k(\xi_j)\,h^d}$ encoding the
+spectral density of the (stationary, product) kernel, and
+$T \in \mathbb{C}^{M\times M}$ is the block-Toeplitz ``data Gram'' whose
+entries are $T_{ij} = \sum_{n=1}^N e^{2\pi i (\xi_i-\xi_j)\cdot x_n}$. The
+solver is PCG with tolerance $10^{-4}$.
+
+Exact matrix assembly costs $\bigo(M^2)$; neither that nor $\bigo(M^3)$
+factorisation is an option when $M$ reaches $10^3$–$10^5$. An
+application $v \mapsto Av$ runs in $\bigo(d\, M\log m)$ via an FFT-based
+Toeplitz product. PCG's runtime is therefore
+$\bigo\bigl(k_{\mathrm{iter}} \cdot d\, M\log m\bigr)$, so the practical
+question is \emph{how fast does $k_{\mathrm{iter}}$ grow}, and what can
+the preconditioner do about it.
+
+\section{Two easy baselines and why they can fail}
+
+\paragraph{Jacobi ($\diag(A)^{-1}$).}
+The diagonal of $A$ is exactly $T_{0}\,|w_j|^2 + \sigma^2$, where
+$T_0 = v_{\mathrm{kernel}}[0] \approx N$. Jacobi is essentially free and
+is adequate when the cross-terms of $D T D$ are not dominant --- i.e.\ a
+high-noise, moderate-$\ell$, well-spread-sample regime. It degrades
+quickly as $\ell$ shrinks or $\sigma^2 \to 0$ in $d \geq 2$: the near-null
+space of $D T D$ becomes large, the tail frequencies have tiny
+$|w_j|^2$, and the scaled operator still has condition number
+$\bigo(\kappa(T))$.
+
+\paragraph{Randomised Nystr\"{o}m.}
+Form $P = U \Lambda U^\top + \mu(I - UU^\top)$ with $\mu = \sigma^2$ and
+$(U,\Lambda)$ a rank-$k$ Nystr\"{o}m approximation of $A - \sigma^2 I$
+(\texttt{create\_nystrom\_precond}). Excellent when $A$ has a clear
+top-$k$ eigengap (clustered samples, anisotropic geometry); essentially
+useless otherwise, because for uniform spreads the spectrum of $DTD$
+decays smoothly and no small rank is enough. Setup also costs $k$ full
+$A$-applies, so it is only worth it when the resulting iteration count
+is small.
+
+\section{The Kronecker preconditioner}
+
+\subsection{Structure being exploited}
+
+For a product-separable spectral density $\hat k(\xi) = \prod_{j=1}^d
+\hat k_j(\xi_j)$ (e.g.\ the squared exponential, product Mat\'{e}rn), the
+weight vector factorises on the tensor grid:
+\begin{equation}
+  w[i_1,\ldots,i_d] \;=\; \prod_{k=1}^d D_k[i_k],
+  \qquad
+  D_k[i_k] = \sqrt{\hat k_k(\xi_{i_k})\, h}
+  \quad \text{up to a normalising constant.}
+  \label{eq:w-factor}
+\end{equation}
+The data Toeplitz $T$ is characterised by its symbol
+$v(\delta) = \sum_{n=1}^N e^{2\pi i \delta \cdot x_n}$, or equivalently by
+the empirical characteristic function
+$\hat\varphi_N(\delta) := v(\delta)/N$.
+If the samples are drawn iid from a \emph{product measure}
+$p(x) = \prod_{k=1}^d p_k(x_k)$, the true CF factorises,
+$\varphi_X(\delta) = \prod_k \varphi_{X_k}(\delta_k)$, and by the
+law of large numbers so does the empirical one:
+\begin{equation}
+  \hat\varphi_N(\delta) \;\;\longrightarrow\;\;
+  \prod_{k=1}^d \hat\varphi_{N,k}(\delta_k)
+  \qquad \text{as } N\to\infty,
+  \qquad
+  \hat\varphi_{N,k}(\delta_k) := \tfrac{1}{N}v(0,\ldots,\delta_k,\ldots,0),
+  \label{eq:v-factor}
+\end{equation}
+with finite-sample error $\mathcal{O}(1/\sqrt N)$. Pulling out the $N$'s,
+this is $T \approx \bigotimes_{k=1}^d T_k$ in expectation, where the $T_k$
+are $1$-D Toeplitz blocks built from the axis-$k$ slices of $v$. Writing
+$H_k := D_k T_k D_k$ and $H := \bigotimes_k H_k$,
+\begin{equation}
+  A \;\approx\; H + \sigma^2 I,\qquad
+  H = \bigotimes_{k=1}^d H_k.
+  \label{eq:kron-ideal}
+\end{equation}
+A deterministic grid is the zero-error limit; any iid product measure
+(uniform, independent Gaussian, iid mixtures, etc.) works too, with
+error shrinking as $N$ grows.
+Since each $H_k = V_k \Lambda_k V_k^H$ is Hermitian positive
+semidefinite (size $m\times m$), the full eigendecomposition of $H$ is
+\begin{equation}
+  H = \Bigl(\bigotimes_k V_k\Bigr) \Lambda \Bigl(\bigotimes_k V_k\Bigr)^H,
+  \qquad
+  \Lambda = \bigotimes_k \Lambda_k,
+  \label{eq:kron-eig}
+\end{equation}
+and $A^{-1}$ applies in $\bigo(d\, M\,m)$ flops.
+\subsection{Why $T \approx \bigotimes_k T_k$: a finite-sample statement}
+
+\paragraph{Empirical characteristic functions.}
+Let $X = (X_1,\ldots,X_d) \sim p$ with $p(x) = \prod_{k=1}^d p_k(x_k)$, and let
+$\{x_n\}_{n=1}^N \stackrel{\mathrm{iid}}{\sim} p$. Write
+\begin{equation}
+  \hat\varphi_N(\delta) \;:=\; \frac{1}{N}\sum_{n=1}^N e^{2\pi i\,\delta\cdot x_n},
+  \qquad
+  \hat\varphi_{N,k}(\delta_k) \;:=\; \hat\varphi_N(\delta_k e_k)
+  \;=\; \frac{1}{N}\sum_{n=1}^N e^{2\pi i\,\delta_k x_{n,k}},
+  \label{eq:ecf}
+\end{equation}
+for the joint and axis-$k$ marginal empirical CFs. Let
+$\varphi(\delta) := \mathbb{E}[e^{2\pi i\,\delta\cdot X}]$ and
+$\varphi_k(\delta_k) := \mathbb{E}[e^{2\pi i\,\delta_k X_k}]$; independence gives
+$\varphi(\delta) = \prod_k \varphi_k(\delta_k)$, with $|\varphi_k| \le 1$.
+
+\begin{lemma}\label{lem:ecf-factor}
+For any compact $K \subset \mathbb{R}^d$,
+\[
+  \sup_{\delta \in K}\;
+  \Bigl|\, \hat\varphi_N(\delta) \;-\; \prod_{k=1}^d \hat\varphi_{N,k}(\delta_k)\,\Bigr|
+  \;=\; O_p\!\bigl(N^{-1/2}\bigr).
+\]
+\end{lemma}
+
+\begin{proof}
+Define the (complex) empirical processes
+\[
+  W_N(\delta)\;:=\;\sqrt{N}\bigl(\hat\varphi_N(\delta)-\varphi(\delta)\bigr),
+  \qquad
+  W_{N,k}(\delta_k)\;:=\;\sqrt{N}\bigl(\hat\varphi_{N,k}(\delta_k)-\varphi_k(\delta_k)\bigr).
+\]
+Each is a normalised average of iid bounded complex random variables
+(modulus $\le 1$), so by the multivariate CLT plus standard equicontinuity
+arguments for empirical CFs (e.g.\ Cs\"org\H{o} 1981; the class
+$\{e^{2\pi i \delta \cdot x}:\delta\in K\}$ is Donsker), each converges in
+distribution in $\ell^\infty(K)$ to a mean-zero Gaussian process and is
+therefore $O_p(1)$ uniformly on $K$.
+
+Substitute
+$\hat\varphi_{N,k}(\delta_k) = \varphi_k(\delta_k) + N^{-1/2} W_{N,k}(\delta_k)$
+and expand:
+\begin{equation}
+  \prod_{k=1}^d \hat\varphi_{N,k}(\delta_k)
+  \;=\; \prod_k \varphi_k(\delta_k)
+       + N^{-1/2}\sum_k \varphi_{\setminus k}(\delta)\,W_{N,k}(\delta_k)
+       + N^{-1}\,\mathcal{R}_N(\delta),
+  \label{eq:product-expansion}
+\end{equation}
+where $\varphi_{\setminus k}(\delta) := \prod_{j\ne k}\varphi_j(\delta_j)$
+(hence $|\varphi_{\setminus k}|\le 1$), and $\mathcal{R}_N$ collects all
+cross-products of two or more $W_{N,k}$'s. Since each $W_{N,k}$ is $O_p(1)$
+uniformly on $K$, so is $\mathcal{R}_N$.
+
+Subtracting \eqref{eq:product-expansion} from
+$\hat\varphi_N(\delta) = \varphi(\delta) + N^{-1/2} W_N(\delta)$ and using
+$\varphi(\delta)=\prod_k\varphi_k(\delta_k)$:
+\[
+  \hat\varphi_N(\delta) - \prod_k\hat\varphi_{N,k}(\delta_k)
+  \;=\; N^{-1/2}\Bigl[\,W_N(\delta)\;-\;\textstyle\sum_k \varphi_{\setminus k}(\delta) W_{N,k}(\delta_k)\Bigr]
+        \;+\; O_p(N^{-1}),
+\]
+and the bracket is $O_p(1)$ uniformly on $K$.
+\end{proof}
+
+\paragraph{Identification of $T$ and $\bigotimes_k T_k$.}
+The Gram is exactly $N$ times the joint empirical CF evaluated on frequency
+differences:
+\begin{equation}
+  T_{\,ij}
+  \;=\; \sum_{n=1}^N e^{2\pi i(\xi_i-\xi_j)\cdot x_n}
+  \;=\; N\,\hat\varphi_N(\xi_i-\xi_j).
+  \label{eq:T-as-ecf}
+\end{equation}
+For the axis-$k$ Toeplitz, the code assembles a $1$-D kernel vector from
+the axis-$k$ slice $v(\delta_k e_k)$ of $v_{\mathrm{kernel}}$ and applies the
+normalisation $T_k \leftarrow \tilde T_k / v_{\mathrm{kernel}}[0]^{(d-1)/d}$
+with $v_{\mathrm{kernel}}[0] = N$. Unpacking:
+\[
+  \tilde T_k\bigl[i_k,j_k\bigr]
+  \;=\; v\bigl((\xi_{i_k,k}-\xi_{j_k,k})\,e_k\bigr)
+  \;=\; N\,\hat\varphi_{N,k}(\xi_{i_k,k}-\xi_{j_k,k}),
+\]
+so after normalisation
+\begin{equation}
+  (T_k)_{i_k,j_k}
+  \;=\; N^{1/d}\,\hat\varphi_{N,k}(\xi_{i_k,k}-\xi_{j_k,k}).
+  \label{eq:Tk-as-ecf}
+\end{equation}
+Taking the Kronecker product and collapsing $N^{1/d}$ factors:
+\begin{equation}
+  \Bigl(\bigotimes_{k=1}^d T_k\Bigr)_{\!i,j}
+  \;=\; \prod_k (T_k)_{i_k,j_k}
+  \;=\; N\,\prod_{k=1}^d \hat\varphi_{N,k}\bigl(\xi_{i_k,k}-\xi_{j_k,k}\bigr).
+  \label{eq:kron-as-ecf-prod}
+\end{equation}
+The $(d-1)/d$ exponent is \emph{exactly} the normalisation that makes the
+$N$'s collapse correctly, so both $T$ and $\bigotimes_k T_k$ are $N$ times a
+characteristic function --- the joint CF in \eqref{eq:T-as-ecf}, and its
+coordinate-wise factorisation in \eqref{eq:kron-as-ecf-prod}.
+
+\paragraph{Entrywise rate.}
+Subtracting and applying Lemma~\ref{lem:ecf-factor} with
+$K = \{\xi_i - \xi_j : i,j\in[m]^d\}$ (finite, hence compact):
+\begin{equation}
+  R_{ij} \;:=\; T_{ij} - \Bigl(\bigotimes_k T_k\Bigr)_{ij}
+  \;=\; N\bigl[\hat\varphi_N(\delta_{ij}) - \textstyle\prod_k \hat\varphi_{N,k}(\delta_{ij,k})\bigr]
+  \;=\; O_p\!\bigl(\sqrt N\bigr),
+  \label{eq:R-entrywise}
+\end{equation}
+uniformly in $(i,j)$, where $\delta_{ij} := \xi_i-\xi_j$. Contrast with
+$T_{ii} = N$: relative entrywise error is $O_p(N^{-1/2})$.
+
+\paragraph{Operator norm.}
+A crude but sufficient bound uses Frobenius:
+$\|R\|_{\mathrm{op}} \le \|R\|_F = \bigl(\sum_{ij}|R_{ij}|^2\bigr)^{1/2} = O_p(\sqrt{N}\,M)$.
+Meanwhile $\|T\|_{\mathrm{op}} \ge \max_j T_{jj} = N$, so for fixed $M$
+(i.e.\ fixed quadrature accuracy $\varepsilon$ and fixed $\ell$), the
+relative operator error
+$\|R\|_{\mathrm{op}} / \|T\|_{\mathrm{op}} = O_p(M/\sqrt N) \to 0$
+as $N\to\infty$. Tighter bounds via non-commutative concentration
+(Tropp matrix Bernstein, applied to $R = \sum_n R^{(n)}$ with each
+$R^{(n)}$ the contribution of sample $x_n$) give
+$\|R\|_{\mathrm{op}} = O_p\!\bigl(\sqrt{N \log M}\bigr)$,
+shaving the $M$ to a $\sqrt{\log M}$, but \eqref{eq:R-entrywise} is the
+content of the approximation.
+
+Sandwiching by $D$ and comparing to $A = DTD + \sigma^2 I$, the preconditioned
+operator $M^{-1/2} A M^{-1/2} = I + M^{-1/2}(DRD) M^{-1/2}$ has
+\[
+  \bigl\|M^{-1/2}(DRD)M^{-1/2}\bigr\|_{\mathrm{op}} \;=\; O_p(N^{-1/2})
+  \qquad \text{(at fixed $M$, $\ell$, $\sigma^2 > 0$)},
+\]
+whence $\kappa(M^{-1/2} A M^{-1/2}) = 1 + O_p(N^{-1/2})$ and CG attains
+tolerance $\varepsilon$ in $O(\log \varepsilon^{-1})$ steps independent of
+$N$. The tensor-grid case is the degenerate $N^{-1/2} \to 0$ limit where
+$R \equiv 0$ deterministically.
+
+\subsection{What we actually build}
+
+For general (non-gridded) samples, $T$ is \emph{not} exactly separable, but
+its Kronecker restriction remains a useful approximation: the operator
+$\tilde A := \bigl(\bigotimes_k H_k\bigr) + \sigma^2 I$ uses, as
+$T_k$, the $1$-D Toeplitz whose symbol is the axis-$k$ marginal of
+$v_{\mathrm{kernel}}$ (i.e.\ the slice with all other indices pinned at
+$0$) and the Jacobi-style normalisation
+$D_k \gets D_k / w_{\mathrm{ctr}}^{(d-1)/d}$,
+$T_k \gets T_k / v_{\mathrm{kernel}}[0]^{(d-1)/d}$,
+so that $\bigotimes_k H_k$ reproduces $A - \sigma^2 I$ exactly on
+tensor-grid data (and to leading order on well-spread data).
+
+The preconditioner is then
+\begin{equation}
+  M^{-1} \;=\; \Bigl(\bigotimes_k V_k\Bigr)\;
+              \bigl(\Lambda + \sigma^2 I\bigr)^{-1}\;
+              \Bigl(\bigotimes_k V_k\Bigr)^H.
+  \label{eq:precond}
+\end{equation}
+The apply is three passes over the $d$-dimensional tensor:
+(i) mode-$k$ multiplication by $V_k^H$ for $k=1,\ldots,d$;
+(ii) pointwise division by the Kronecker-diagonal
+$\bigl(\prod_k \lambda_k^{(i_k)}\bigr) + \sigma^2$;
+(iii) mode-$k$ multiplication by $V_k$. No $M\times M$ matrix is ever
+materialised.
+
+\section{Complexity}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+& \textbf{Setup (one-time)} & \textbf{Apply (per PCG iter)} \\
+\midrule
+Jacobi             & $\bigo(M)$                & $\bigo(M)$                   \\
+Nystr\"{o}m (rank $r$) & $\bigo(r \cdot d M\log m)$ ($r$ A-applies) + $\bigo(Mr^2)$ & $\bigo(M r)$                 \\
+Kronecker          & $\bigo(d\, m^3)$          & $\bigo(d\, M\, m)$           \\
+A-apply (reference) & ---                       & $\bigo(d\, M\log m)$         \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The per-iteration cost of applying the Kronecker preconditioner is
+\emph{larger} than one $A$-apply by a factor of $m/\log m$. For $m=39$
+this is $\sim\!11\times$. Kronecker is therefore only a net win if it
+reduces the PCG iteration count by at least that factor.
+
+Setup is a one-time $\bigo(d\, m^3)$. In $d\geq 3$ this is
+\emph{cheaper} than a single $A$-apply. In $d=2$ it equals roughly ten
+$A$-applies, which is negligible once it is amortised over a handful of
+CG iterations or Adam steps.
+
+\section{When it helps, theoretically}
+
+Consider the spectrum of $A$. Write the eigenvalues of each
+$H_k$ as $\lambda^{(i_k)}_k$. The Kronecker-preconditioned operator is
+\[
+  M^{-1/2} A M^{-1/2}
+  \;=\; I
+  \;+\; M^{-1/2}\bigl(T - \bigotimes_k T_k\bigr) D\cdot D\, M^{-1/2}.
+\]
+The condition number is governed by the \emph{non-separable remainder}
+$R := T - \bigotimes_k T_k$. Three regimes:
+
+\paragraph{(a) Exactly separable data.}
+If samples lie on a tensor grid, $R = 0$ and $M^{-1/2} A M^{-1/2} = I$.
+PCG converges in exactly one step. Our \texttt{grid} benchmark confirms
+this ($1$ iter vs.\ 2000+ unpreconditioned).
+
+\paragraph{(b) Well-spread, non-gridded data.}
+For generic $\{x_n\}$ in $[-L,L]^d$ with bounded second moment, $R$ is a
+\emph{low-order} perturbation of the separable tensor --- roughly, it
+captures only the cross-axis fluctuations that $1$-D marginals miss. In
+this regime $\|M^{-1/2} R M^{-1/2}\| \ll 1$ and PCG converges in
+$\bigo(\log \epsilon^{-1})$ iterations, independent of $N$, $\ell$, and
+$\sigma^2$ to leading order. Empirically we see $3$--$40$ iterations on
+uniform SE in $d=2$ across the entire range of $(\ell,\sigma^2)$ we
+tested, including the Jacobi-killing short-$\ell$/low-$\sigma$ corner.
+
+\paragraph{(c) Strongly clustered data.}
+When samples concentrate near $p$ points (``$p$-cluster'' data), $T$
+acquires a rank-$p$ structure that is \emph{not} captured by any
+product of $1$-D marginals, because the cross-axis correlation
+is exactly what the clustering induces. Here $R$ is large and
+Kronecker degrades to roughly the same iteration count as Jacobi;
+Nystr\"{o}m is the appropriate tool because a rank-$\bigo(p)$
+correction resolves the structure.
+
+\section{Summary}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Data geometry} & \textbf{Spectrum of $R$} & \textbf{Best preconditioner}\\
+\midrule
+Tensor grid                       & $R = 0$                   & \textbf{Kronecker} (1 iter)\\
+Jittered grid / Poisson / uniform & low rank + fast decay     & \textbf{Kronecker}\\
+Mildly anisotropic                & similar                   & \textbf{Kronecker}\\
+$p$-cluster, Gaussian blob        & rank-$p$, not separable   & \textbf{Nystr\"{o}m} (rank $\gtrsim p$)\\
+Extreme high noise ($\sigma^2 \gg \|w\|_\infty^2 T_0$) & $R$ dominated by $\sigma^2 I$ & Jacobi suffices\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Algorithmic conditions under which Kronecker is the right
+default.} All three of:
+\begin{enumerate}\itemsep2pt
+  \item \emph{Separable kernel:} $\hat k(\xi) = \prod_k \hat k_k(\xi_k)$.
+        Holds for SE, product-Mat\'{e}rn, product-rational-quadratic.
+  \item \emph{Non-clustered samples:} empirical density of $x_n$ is
+        bounded above and below on its support. Uniform, jittered-grid,
+        and low-variance log-Gaussian covariates all qualify. Point
+        clusters do not.
+  \item \emph{Moderate $d$:} the per-iter overhead $m/\log m$ is small.
+        For $d \leq 3$ and quadrature $\epsilon = 10^{-4}$ giving
+        $m \leq 40$, this is always $\leq 11\times$, and the iteration
+        savings are much larger than that.
+\end{enumerate}
+
+When these hold simultaneously, Kronecker is roughly $1.5$--$2\times$
+faster wall-clock than Jacobi on warm Adam trajectories, and
+$10$--$100\times$ faster at the stiff corners that Jacobi fails to
+traverse ($\ell \ll 1$, $\sigma^2 \ll 1$). Cost of being wrong
+(``always default to Kronecker, including on clustered data'') is a
+small overhead ($\sim\!2\times$ slower than Jacobi in the worst non-ideal
+case), which is why it is a safe default in the EFGP pipeline for any
+product kernel.
+
+\end{document}

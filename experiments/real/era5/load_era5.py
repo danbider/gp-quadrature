@@ -6,11 +6,29 @@ File: era5.nc — global 0.25° grid, 721 x 1440 = ~1M cells.
 Variable: t2m (2-meter temperature in Kelvin).
 """
 
-import os
+from pathlib import Path
 import numpy as np
 import h5py
 
-DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "era5.nc")
+_MODULE_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _MODULE_DIR.parents[2]
+_FILENAME = "era5.nc"
+_SEARCH_DIRS = (_MODULE_DIR / "data", _MODULE_DIR, _REPO_ROOT)
+
+
+def _resolve_data_path():
+    tried = []
+    for base in _SEARCH_DIRS:
+        p = (base / _FILENAME).resolve()
+        if p.exists():
+            return p
+        tried.append(str(p))
+    raise FileNotFoundError(
+        "ERA5 dataset not found. Looked in:\n  " + "\n  ".join(tried)
+    )
+
+
+DATA_PATH = _resolve_data_path()
 
 
 def load_era5(n_sub=None, seed=0, celsius=True):

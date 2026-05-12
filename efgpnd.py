@@ -9,10 +9,109 @@ from torch import nn
 from torch.optim import Adam
 from torch.profiler import profile, record_function, ProfilerActivity
 import pytorch_finufft.functional as pff
-from utils.kernels import get_xis
+from utils.kernels import get_xis, get_xis_per_dim
 from cg import ConjugateGradients
 import time
 from kernels.kernel_params import GPParams
+
+
+def _resolve_grid(kernel, x, eps, frozen_grid=None, max_mtot_1d=None,
+                  rdtype=None, device=None):
+    """Return per-dim grid info, dispatching on isotropic vs ARD kernel.
+
+    Returns
+    -------
+    xis_1d_list : list of length d, each a 1D tensor on (device, rdtype)
+    h_per_dim   : tensor of length d on (device, rdtype)
+    mtot_per_dim: list of length d ints
+    xis_flat    : (M, d) flattened tensor product of xis_1d_list, on (device, rdtype)
+
+    Notes
+    -----
+    For isotropic kernels (no ``lengthscales`` attr), uses the existing scalar
+    ``get_xis`` and broadcasts to per-dim. For ARD kernels (``lengthscales``
+    attr), calls ``get_xis_per_dim`` with per-dim ranges and lengthscales.
+
+    ``frozen_grid`` may be the legacy ``(xis_1d, h)`` (scalar) or a new
+    ``(xis_1d_list, h_per_dim)`` per-dim form. ``max_mtot_1d`` caps each axis
+    independently.
+    """
+    device = device or x.device
+    rdtype = rdtype or x.dtype
+    d = x.shape[1]
+
+    if frozen_grid is not None:
+        # Accept either the legacy isotropic form or the new per-dim form.
+        xis_1d, h = frozen_grid
+        if isinstance(xis_1d, (list, tuple)):
+            xis_1d_list = [t.to(device=device, dtype=rdtype) for t in xis_1d]
+        else:
+            t = xis_1d.to(device=device, dtype=rdtype)
+            xis_1d_list = [t for _ in range(d)]
+        if torch.is_tensor(h):
+            h_t = h.to(device=device, dtype=rdtype)
+            if h_t.ndim == 0:
+                h_t = h_t.expand(d).clone()
+        elif hasattr(h, '__len__'):
+            h_t = torch.tensor(list(h), device=device, dtype=rdtype)
+        else:
+            h_t = torch.full((d,), float(h), device=device, dtype=rdtype)
+        mtot_per_dim = [t.numel() for t in xis_1d_list]
+    else:
+        # Build from kernel + data extent.
+        if hasattr(kernel, 'lengthscales'):
+            # ARD path
+            ls = kernel.lengthscales.tolist()
+            L_per_dim = []
+            for k in range(d):
+                col = x[:, k]
+                L_k = float(col.max() - col.min())
+                if L_k <= 1e-9:
+                    L_k = 1.0
+                L_per_dim.append(L_k)
+            xis_1d_list, h_t, mtot_per_dim = get_xis_per_dim(
+                kernel_obj=kernel, eps=eps,
+                L_per_dim=L_per_dim, lengthscales=ls,
+                use_integral=True, l2scaled=False, dtype=rdtype,
+            )
+            xis_1d_list = [t.to(device=device, dtype=rdtype) for t in xis_1d_list]
+            h_t = h_t.to(device=device, dtype=rdtype)
+        else:
+            # Isotropic path: use existing scalar get_xis, broadcast to per-dim.
+            L = float((x.max(dim=0).values - x.min(dim=0).values).max())
+            if L <= 1e-9:
+                L = 1.0
+            xis_1d, h_scalar, mtot = get_xis(
+                kernel_obj=kernel, eps=eps, L=L,
+                use_integral=True, l2scaled=False,
+            )
+            xis_1d = xis_1d.to(device=device, dtype=rdtype)
+            xis_1d_list = [xis_1d for _ in range(d)]
+            h_t = torch.full((d,), float(h_scalar), device=device, dtype=rdtype)
+            mtot_per_dim = [mtot] * d
+
+    # Apply max_mtot_1d cap per axis (keep central nodes).
+    if max_mtot_1d is not None:
+        capped_list = []
+        capped_mtot = []
+        for k, t in enumerate(xis_1d_list):
+            mtot_k = t.numel()
+            if mtot_k > max_mtot_1d:
+                half = max_mtot_1d // 2
+                center = mtot_k // 2
+                lo = center - half
+                hi = lo + (2 * half + 1)
+                t = t[lo:hi]
+                mtot_k = t.numel()
+            capped_list.append(t)
+            capped_mtot.append(mtot_k)
+        xis_1d_list = capped_list
+        mtot_per_dim = capped_mtot
+
+    # Build flat (M, d) tensor product
+    grids = torch.meshgrid(*xis_1d_list, indexing='ij')
+    xis_flat = torch.stack(grids, dim=-1).view(-1, d)
+    return xis_1d_list, h_t, mtot_per_dim, xis_flat
 
 def efgpnd_gradient_batched(
         x, y, sigmasq, kernel, eps, trace_samples, x0, x1,
@@ -21,6 +120,10 @@ def efgpnd_gradient_batched(
         noise_floor: Optional[float] = None,
         stats_out: Optional[Dict[str, float]] = None,
         mean_cg_init: Optional[torch.Tensor] = None,
+        trace_cg_init: Optional[torch.Tensor] = None,
+        trace_probes: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        frozen_cache: Optional[Dict] = None,
+        y_norm2: Optional[torch.Tensor] = None,
         use_mean_cg_preconditioner: bool = True,
         use_trace_cg_preconditioner: bool = True,
         mean_cg_preconditioner_type: str = "kronecker",
@@ -66,24 +169,19 @@ def efgpnd_gradient_batched(
         # 0)  Book‑keeping ------------------------------------------------------
         with record_function("0_book_keeping"):
             device  = device or x.device
-            # device = x.device
             dtype = x.dtype
-            rdtype = dtype 
+            rdtype = dtype
             cdtype = _cmplx(rdtype)
             x       = x.to(device, dtype)
             y       = y.to(device, dtype)
             if x.ndim == 1:
                 x = x.unsqueeze(-1)
             cmplx   = _cmplx(dtype)
-            x0 = x.min(dim=0).values  
-            x1 = x.max(dim=0).values  
-
-            if x.ndim == 1:
-                x = x.unsqueeze(-1)
             d = x.shape[1]
-            domain_lengths = x1 - x0
-            L = domain_lengths.max()
             N = x.shape[0]
+            # Note: x0, x1, domain_lengths, L used to be computed here but were
+            # dead — _resolve_grid recomputes its own L from x when needed, and
+            # nothing else in this function reads them.
             if noise_floor is not None:
                 sigmasq_eff = sigmasq.clamp_min(noise_floor)
             else:
@@ -96,54 +194,62 @@ def efgpnd_gradient_batched(
                 if i != variance_idx
             ]
         
-        # Get frequency grid and weights
+        # Get frequency grid and weights (per-dim for ARD, scalar for isotropic)
         with record_function("1_frequency_grid_setup"):
+            xis_1d_list, h_per_dim, mtot_per_dim, xis = _resolve_grid(
+                kernel, x, eps,
+                frozen_grid=frozen_grid, max_mtot_1d=max_mtot_1d,
+                rdtype=rdtype, device=device,
+            )
+            # cell volume in d-dim frequency space (Π_k h_k)
+            cell_vol = torch.prod(h_per_dim)
+            ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=cdtype) * cell_vol) # (M,)
+            Dprime  = (cell_vol * kernel.spectral_grad(xis)).to(cmplx)  # (M, num_hypers-1)
+
+            # Frozen-grid cache key. F, F*, v_kernel and Toeplitz only depend on
+            # (x, mtot, h) — none on kernel hypers or σ². So when frozen_grid is
+            # active we can stash them and skip rebuild on subsequent iters.
+            cache_key = None
             if frozen_grid is not None:
-                xis_1d, h = frozen_grid
-                xis_1d = xis_1d.to(device=device, dtype=rdtype)
-                if torch.is_tensor(h):
-                    h = h.to(device=device, dtype=rdtype)
-                else:
-                    h = torch.tensor(h, device=device, dtype=rdtype)
-                mtot = xis_1d.numel()
-            else:
-                xis_1d, h, mtot = get_xis(kernel_obj=kernel, eps=eps, L=L, use_integral=True, l2scaled=False)#,trunc_eps=0.01)
-                if max_mtot_1d is not None and mtot > max_mtot_1d:
-                    # Cap mtot_1d: keep central (2*half+1) nodes, drop spectral tails.
-                    half = max_mtot_1d // 2
-                    center = mtot // 2
-                    keep_lo = center - half
-                    keep_hi = keep_lo + (2 * half + 1)
-                    xis_1d = xis_1d[keep_lo:keep_hi]
-                    mtot = xis_1d.numel()
-            grids = torch.meshgrid(*(xis_1d for _ in range(d)), indexing='ij') # makes tensor product Jm
-            xis = torch.stack(grids, dim=-1).view(-1, d)
-            ws = torch.sqrt(kernel.spectral_density(xis).to(dtype=cdtype) * h**d) # (mtot**d,1)
-            Dprime  = (h**d * kernel.spectral_grad(xis)).to(cmplx)  # (M, 3)
-            # print(xis.shape)
+                cache_key = (
+                    int(id(x)),
+                    tuple(int(m) for m in mtot_per_dim),
+                    tuple(round(float(v), 12) for v in h_per_dim.tolist()),
+                )
+            cache_hit = (
+                frozen_cache is not None
+                and cache_key is not None
+                and frozen_cache.get("key") == cache_key
+            )
 
         # 1)  NUFFT adjoint / forward helpers (modeord=False) -------------------
         with record_function("2_nufft_setup"):
-            OUT = (mtot,)*d
-            
-            # Create a center point at origin
-            xcen = torch.zeros(d, device=device, dtype=dtype)
-            
-            # Create the NUFFT operator
-            nufft_op = NUFFT(x, xcen, h, nufft_eps, cdtype=cdtype, device=device)
-            # print(nufft_eps)
-            
-            # Define the simplified helper functions
+            OUT = tuple(mtot_per_dim)
+
+            if cache_hit:
+                nufft_op = frozen_cache["nufft_op"]
+            else:
+                # Create a center point at origin
+                xcen = torch.zeros(d, device=device, dtype=dtype)
+                # Create the NUFFT operator (h_per_dim is per-axis grid spacing)
+                nufft_op = NUFFT(x, xcen, h_per_dim, nufft_eps, cdtype=cdtype, device=device)
+
+            # Helper closures (must be rebuilt each call to bind current OUT/nufft_op)
             fadj = lambda v: nufft_op.type1(v, out_shape=OUT).reshape(-1)    # F* apply: nonuniform → uniform
             fwd = lambda fk: nufft_op.type2(fk, out_shape=OUT)                # F apply:  uniform → nonuniform
 
         # 2)  Toeplitz operator T (cached FFT) ----------------------------------
         with record_function("3_toeplitz_setup"):
-            m_conv = (mtot - 1) // 2
-            v_kernel = compute_convolution_vector_vectorized_dD(m_conv, x, h).to(dtype=cdtype)
-            toeplitz = ToeplitzND(v_kernel, force_pow2=False)               # cached once
+            if cache_hit:
+                v_kernel = frozen_cache["v_kernel"]
+                toeplitz = frozen_cache["toeplitz"]
+            else:
+                m_conv = [(m_k - 1) // 2 for m_k in mtot_per_dim]
+                v_kernel = compute_convolution_vector_vectorized_dD(m_conv, x, h_per_dim).to(dtype=cdtype)
+                toeplitz = ToeplitzND(v_kernel, force_pow2=False)           # cached once
 
             # 3)  Linear map A· = D F*F (D·) + σ² I -------------------------------
+            # ws and σ² depend on hypers — must rebuild every iter even with cache.
             A_apply = create_A_mean(ws, toeplitz, sigmasq_eff, cdtype)
             center = tuple(((torch.tensor(v_kernel.shape, device=device) - 1) // 2).tolist())
             diag_scale = v_kernel[center].real
@@ -157,7 +263,7 @@ def efgpnd_gradient_batched(
                 shared_M_inv = create_jacobi_precond(ws, sigmasq_eff, diag_scale=diag_scale)
             elif mean_cg_preconditioner_type == "kronecker":
                 shared_M_inv = create_kronecker_precond(
-                    ws, v_kernel, sigmasq_eff, d=d, mtot_1d=mtot,
+                    ws, v_kernel, sigmasq_eff, d=d, mtot_1d=mtot_per_dim,
                     device=device, cdtype=cdtype, rdtype=rdtype,
                 )
             else:
@@ -170,7 +276,11 @@ def efgpnd_gradient_batched(
 
         # 4)  Solve A β = W F* y ---------------------------------------------
         with record_function("4_solve_cg"):
-            Fy = fadj(y).reshape(-1)
+            # F* y depends only on (x, y, h, mtot) — cacheable under frozen grid.
+            if cache_hit and "Fy" in frozen_cache:
+                Fy = frozen_cache["Fy"]
+            else:
+                Fy = fadj(y).reshape(-1)
 
             rhs   = ws * Fy
             if mean_cg_init is not None and mean_cg_init.shape == rhs.shape:
@@ -199,7 +309,9 @@ def efgpnd_gradient_batched(
             # rather than via the Woodbury identity, which would invoke
             # A_mean β₀ = D·F*y exactly. See scratch/gradient_derivation.tex.
             Tbeta       = toeplitz(beta)
-            y_norm2     = torch.dot(y, y)
+            # y_norm2 = ‖y‖² is constant across iters; cache via the kwarg.
+            if y_norm2 is None:
+                y_norm2 = torch.dot(y, y)
             c_scalar    = torch.vdot(beta_raw, ws * Fy).real       # Re{<β₀, D·F*y>}
             beta_T_beta = torch.vdot(beta, Tbeta).real             # β₀* DTD β₀
             alpha_norm  = (y_norm2 - 2 * c_scalar + beta_T_beta) / (sigmasq_eff ** 2)
@@ -214,14 +326,29 @@ def efgpnd_gradient_batched(
         with record_function("6_monte_carlo_trace"):
             T  = trace_samples
             trace_kernel_count = len(trace_kernel_indices)
+            # When the caller passes frozen probes (V_kernel_in, V_in) with the
+            # right shape we reuse them so the RHS B_all is identical across
+            # iters. This is what makes the trace_cg_init warm start meaningful
+            # — the previous Beta_all is only a good starting point if the new
+            # RHS lives in the same direction, which only happens when probes
+            # are reused.
+            probes_shape_ok = (
+                trace_probes is not None
+                and trace_probes[0] is not None and trace_probes[1] is not None
+                and trace_probes[0].shape == (T, ws.numel())
+                and trace_probes[1].shape == (T, ws.numel())
+            )
             if trace_kernel_count > 0:
                 # M-space Rademacher probes for kernel hypers; BD' form has same
                 # eigenvalues as the N-space operator and is strictly tighter
                 # in Frobenius (lower Hutchinson variance). Costs no NUFFTs.
-                V_kernel = torch.empty((T, ws.numel()), device=device, dtype=dtype)
-                V_kernel.bernoulli_(0.5)
-                V_kernel.mul_(2).sub_(1)
-                V_kernel = V_kernel.to(cmplx)
+                if probes_shape_ok:
+                    V_kernel = trace_probes[0].to(device=device, dtype=cmplx)
+                else:
+                    V_kernel = torch.empty((T, ws.numel()), device=device, dtype=dtype)
+                    V_kernel.bernoulli_(0.5)
+                    V_kernel.mul_(2).sub_(1)
+                    V_kernel = V_kernel.to(cmplx)
                 Dp_stack = torch.stack(
                     [Dprime[:, i] for i in trace_kernel_indices], dim=0
                 )                                                       # (Kc, M)
@@ -239,10 +366,13 @@ def efgpnd_gradient_batched(
             #  add the noise‑variance block (hyper‑parameter index == Hk)
             #  using tr(K^{-1}) = n/σ² - σ⁻² tr(A_mean^{-1} G)
             # ------------------------------------------------------------------
-            V = torch.empty((T, ws.numel()), device=device, dtype=dtype)
-            V.bernoulli_(0.5)
-            V.mul_(2).sub_(1)
-            V = V.to(cmplx)
+            if probes_shape_ok:
+                V = trace_probes[1].to(device=device, dtype=cmplx)
+            else:
+                V = torch.empty((T, ws.numel()), device=device, dtype=dtype)
+                V.bernoulli_(0.5)
+                V.mul_(2).sub_(1)
+                V = V.to(cmplx)
             B_noise = ws * toeplitz(ws * V).reshape(T, -1)
 
             B_all = torch.cat((B_all_kernel,  B_noise.unsqueeze(0)), dim=0) \
@@ -255,8 +385,17 @@ def efgpnd_gradient_batched(
         with record_function("7_batch_cg_solve"):
             # M_inv = create_jacobi_precond(ws, sigmasq)
             t1 = time.time()
+            # Warm-start the batched trace solve with the previous Beta_all
+            # when shapes match (i.e. M and trace_samples unchanged AND probes
+            # were frozen — otherwise the cached Beta_all solves a different
+            # RHS and won't help).
+            if (trace_cg_init is not None and probes_shape_ok
+                    and trace_cg_init.shape == B_all.shape):
+                trace_x0 = trace_cg_init.to(device=device, dtype=cmplx).clone()
+            else:
+                trace_x0 = torch.zeros_like(B_all)
             cg_trace = ConjugateGradients(
-                A_apply_batch, B_all, torch.zeros_like(B_all),
+                A_apply_batch, B_all, trace_x0,
                 tol=cg_tol, early_stopping=early_stopping,
                 M_inv_apply=trace_M_inv
             )
@@ -308,18 +447,47 @@ def efgpnd_gradient_batched(
             grad = 0.5 * (term1 - term2)
 
         if stats_out is not None:
+            # For backward compatibility, if all per-dim mtot match, expose a
+            # scalar 'mtot'; otherwise expose the tuple.
+            mtot_scalar = mtot_per_dim[0] if all(m == mtot_per_dim[0] for m in mtot_per_dim) else None
             stats_out.update({
                 "mean_cg_iters": int(cg_mean.iters_completed),
                 "trace_cg_iters": int(cg_trace.iters_completed),
                 "trace_num_rhs": int(B_all.shape[0]),
                 "feature_count": int(ws.numel()),
-                "mtot": int(mtot),
+                "mtot": int(mtot_scalar) if mtot_scalar is not None else tuple(int(m) for m in mtot_per_dim),
+                "mtot_per_dim": tuple(int(m) for m in mtot_per_dim),
                 "trace_samples": int(T),
                 "mean_cg_warm_start_used": bool(mean_cg_init is not None and mean_cg_init.shape == rhs.shape),
+                "trace_cg_warm_start_used": bool(
+                    trace_cg_init is not None and probes_shape_ok
+                    and trace_cg_init.shape == B_all.shape
+                ),
+                "trace_probes_reused": bool(probes_shape_ok),
                 "mean_cg_preconditioned": bool(use_mean_cg_preconditioner),
                 "trace_cg_preconditioned": bool(use_trace_cg_preconditioner),
             })
             stats_out["mean_beta"] = beta_raw
+            stats_out["trace_beta"] = Beta_all.detach().clone()
+            stats_out["trace_probes"] = (
+                V_kernel.detach().clone() if V_kernel is not None else None,
+                V.detach().clone(),
+            )
+            # Stash the hyper-independent state for next iter when frozen_grid
+            # is active. We always emit (even on cache_hit) so the model can
+            # keep holding the same dict across iters.
+            if cache_key is not None:
+                stats_out["frozen_cache"] = {
+                    "key": cache_key,
+                    "nufft_op": nufft_op,
+                    "v_kernel": v_kernel,
+                    "toeplitz": toeplitz,
+                    "Fy": Fy,
+                }
+                stats_out["frozen_cache_hit"] = bool(cache_hit)
+            else:
+                stats_out["frozen_cache"] = None
+                stats_out["frozen_cache_hit"] = False
     
         with record_function("9_log_marginal_likelihood"):
             log_marginal = None
@@ -469,18 +637,23 @@ class EFGPND(nn.Module):
             try:
                 # Use the kernel's own hyperparameter estimation method
                 estimated_lengthscale, estimated_variance, estimated_noise_var = kernel.estimate_hyperparameters(x, y)
-                
-                # Set the estimated hyperparameters
-                if hasattr(kernel, 'set_hyper'):
+
+                # Set the estimated hyperparameters. ARD kernels return a list
+                # of per-dim lengthscales and expose `set_lengthscales`.
+                if hasattr(kernel, 'set_lengthscales') and isinstance(estimated_lengthscale, (list, tuple)):
+                    kernel.set_lengthscales(estimated_lengthscale)
+                    if hasattr(kernel, 'set_hyper'):
+                        kernel.set_hyper('variance', estimated_variance)
+                elif hasattr(kernel, 'set_hyper'):
                     kernel.set_hyper('lengthscale', estimated_lengthscale)
                     kernel.set_hyper('variance', estimated_variance)
                 else:
                     print(f"Warning: Could not set hyperparameters on kernel of type {type(kernel)}")
-                    
+
                 # Use estimated noise variance if not provided
                 if sigmasq is None:
                     sigmasq = estimated_noise_var
-                    
+
             except Exception as e:
                 print(f"Warning: Failed to estimate hyperparameters: {e}")
                 # Use default values (already set during kernel creation)
@@ -514,6 +687,19 @@ class EFGPND(nn.Module):
         self._registered_optimizers = []
         self.last_gradient_stats = {}
         self._last_gradient_beta = None
+        self._last_trace_beta = None
+        self._last_trace_probes = None
+        # Hyper-independent state cached when frozen_grid is active across
+        # gradient calls (NUFFT op, v_kernel, ToeplitzND, F*y). Auto-invalidates
+        # via key check on (id(x), mtot, h_per_dim).
+        self._frozen_cache = None
+        # Grid-refresh schedule state for opts["refresh_grid_every"] / the
+        # refresh_grid_every kwarg on compute_gradients.
+        self._gradient_iter = 0
+        self._cached_frozen_grid = None
+        # ‖y‖² is data-dependent only and never changes during training; cache
+        # lazily on the first gradient call and reuse forever.
+        self._cached_y_norm2 = None
         
         # Update parameter cache
         self._update_param_cache()
@@ -632,6 +818,7 @@ class EFGPND(nn.Module):
         log_marginal_steps: int = 25,
         verbose: bool = False,
         frozen_grid: Optional[Tuple[torch.Tensor, float]] = None,
+        refresh_grid_every: Optional[int] = None,
         max_mtot_1d: Optional[int] = None,
         **kwargs
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
@@ -662,7 +849,17 @@ class EFGPND(nn.Module):
             Number of Lanczos steps for log det when computing log marginal likelihood
         verbose : bool
             If True, print verbose debugging information
-            
+        frozen_grid : optional
+            Explicit ``(xis_1d_list, h_per_dim)`` to use this call. Overrides
+            the ``refresh_grid_every`` schedule for this call only.
+        refresh_grid_every : int, optional
+            If a positive int K, the frequency grid is rebuilt from the
+            current hypers every K calls and reused on intermediate calls.
+            This lets the M-space CG warm-starts and frozen-grid caches
+            apply across iterations. Falls back to ``opts["refresh_grid_every"]``;
+            defaults to None (rebuild every call). Set to 0/None to disable.
+            Ignored when ``frozen_grid`` is passed explicitly.
+
         Returns
         -------
         If compute_log_marginal=False:
@@ -687,39 +884,73 @@ class EFGPND(nn.Module):
         if noise_floor is None:
             noise_floor = self.opts.get("noise_floor")
         use_mean_cg_warm_start = self.opts.get("mean_cg_warm_start", True)
+        use_trace_cg_warm_start = self.opts.get("trace_cg_warm_start", True)
+        # Trace warm start is only meaningful when probes are reused across
+        # iters; default to True so the cached Beta_all can actually help.
+        freeze_trace_probes = self.opts.get("trace_probes_freeze", True)
         use_mean_cg_preconditioner = self.opts.get("mean_cg_preconditioner", True)
         use_trace_cg_preconditioner = self.opts.get("trace_cg_preconditioner", True)
         mean_cg_preconditioner_type = self.opts.get("mean_cg_preconditioner_type", "kronecker")
         nystrom_rank = self.opts.get("nystrom_rank", 30)
         nystrom_oversample = self.opts.get("nystrom_oversample", 10)
         nystrom_seed = self.opts.get("nystrom_seed", 0)
-        
-        # Calculate data bounds for gradient computation
-        x0 = self.x.min(dim=0).values
-        x1 = self.x.max(dim=0).values
-        
+
+        # Lazy O(N) cache: ‖y‖² is constant across iters, compute once.
+        if self._cached_y_norm2 is None:
+            self._cached_y_norm2 = torch.dot(self.y, self.y)
+
         log_marginal_kwargs = {
             'compute_log_marginal': compute_log_marginal,
-            'log_marginal_probes': log_marginal_probes, 
+            'log_marginal_probes': log_marginal_probes,
             'log_marginal_steps': log_marginal_steps
         }
         if cg_tol is None:
             cg_tol = 0.1*self.eps
+
+        # Resolve refresh_grid_every (kwarg beats opts). When the caller did
+        # not pass an explicit frozen_grid and a positive K is set, rebuild the
+        # grid from current hypers every K calls and reuse it on intermediate
+        # calls. Book-keeping is managed on self so users don't need to.
+        if refresh_grid_every is None:
+            refresh_grid_every = self.opts.get("refresh_grid_every")
+        grid_refreshed = None
+        if frozen_grid is None and refresh_grid_every:
+            K = int(refresh_grid_every)
+            if K > 0:
+                if self._gradient_iter % K == 0 or self._cached_frozen_grid is None:
+                    xis_1d_list, h_per_dim, _, _ = _resolve_grid(
+                        self.kernel, self.x, self.eps,
+                        rdtype=self.x.dtype, device=self.x.device,
+                    )
+                    self._cached_frozen_grid = (xis_1d_list, h_per_dim)
+                    grid_refreshed = True
+                else:
+                    grid_refreshed = False
+                frozen_grid = self._cached_frozen_grid
+        self._gradient_iter += 1
+
         gradient_stats = {}
-        # Compute gradients with respect to the original parameters
+        # Compute gradients with respect to the original parameters.
+        # x0/x1 args are kept None — they were dead inside the gradient
+        # function (used to feed a `domain_lengths`/L block that no longer
+        # exists). _resolve_grid recomputes its own L from x when needed.
         result = efgpnd_gradient_batched(
             self.x, self.y,
             sigmasq=self._gp_params.sig2,
             kernel=self.kernel,
             eps=self.eps,
             trace_samples=trace_samples,
-            x0=x0, x1=x1,
+            x0=None, x1=None,
             do_profiling=do_profiling,
             nufft_eps=nufft_eps,
             cg_tol=cg_tol,
             noise_floor=noise_floor,
             stats_out=gradient_stats,
             mean_cg_init=self._last_gradient_beta if use_mean_cg_warm_start else None,
+            trace_cg_init=self._last_trace_beta if use_trace_cg_warm_start else None,
+            trace_probes=self._last_trace_probes if freeze_trace_probes else None,
+            frozen_cache=self._frozen_cache,
+            y_norm2=self._cached_y_norm2,
             use_mean_cg_preconditioner=use_mean_cg_preconditioner,
             use_trace_cg_preconditioner=use_trace_cg_preconditioner,
             mean_cg_preconditioner_type=mean_cg_preconditioner_type,
@@ -732,6 +963,11 @@ class EFGPND(nn.Module):
             **kwargs
         )
         self._last_gradient_beta = gradient_stats.pop("mean_beta", None)
+        self._last_trace_beta = gradient_stats.pop("trace_beta", None)
+        self._last_trace_probes = gradient_stats.pop("trace_probes", None)
+        self._frozen_cache = gradient_stats.pop("frozen_cache", None)
+        if grid_refreshed is not None:
+            gradient_stats["grid_refreshed"] = grid_refreshed
         self.last_gradient_stats = gradient_stats
         
         # Extract results based on what was returned
@@ -766,6 +1002,16 @@ class EFGPND(nn.Module):
             return raw_grad, log_marginal
         else:
             return raw_grad
+
+    def reset_grid_refresh_state(self) -> None:
+        """Drop the cached frozen grid and reset the refresh counter.
+
+        Call this between independent training runs on the same EFGPND when
+        using ``refresh_grid_every``, so the next compute_gradients call
+        rebuilds the grid from current hypers.
+        """
+        self._gradient_iter = 0
+        self._cached_frozen_grid = None
 
     def _compute_common_parameters(self, force_recompute: bool = False, nufft_eps: Optional[float] = None) -> None:
         """
@@ -806,50 +1052,44 @@ class EFGPND(nn.Module):
         x = self.x.to(device=device, dtype=rdtype)
         y = self.y.to(device=device, dtype=rdtype)
         N, d = x.shape
-        
-        # Get domain size (L)
-        L = torch.max(torch.max(x, dim=0).values - torch.min(x, dim=0).values)
-        if L <= 1e-9:
-            L = torch.tensor(1.0, device=device, dtype=rdtype)
-        
-        # Get frequency grid
-        xis_1d, h_float, mtot = get_xis(
-            kernel_obj=self.kernel, 
-            eps=self.eps, 
-            L=L.item(), 
-            use_integral=True, 
-            l2scaled=False
+
+        # Get frequency grid (per-dim for ARD, scalar for isotropic)
+        xis_1d_list, h_per_dim, mtot_per_dim, xis = _resolve_grid(
+            self.kernel, x, self.eps,
+            frozen_grid=None, max_mtot_1d=None,
+            rdtype=rdtype, device=device,
         )
-        h = torch.tensor(h_float, device=device, dtype=rdtype)
-        xis_1d = xis_1d.to(device=device, dtype=rdtype)
-        
-        # Create n-dimensional grid
-        grids = torch.meshgrid(*(xis_1d for _ in range(d)), indexing="ij")
-        xis = torch.stack(grids, dim=-1).view(-1, d)
-        
-        # Store h_float as an attribute for later use
-        xis.h_float = h_float
-        
+
+        # Stash per-dim h on the xis tensor for the variance path. We keep the
+        # legacy ``h_float`` attr (broadcast scalar if uniform) for back-compat
+        # with isotropic-only callers; new callers should consult ``h_per_dim``.
+        if all(float(h_per_dim[0]) == float(h_per_dim[k]) for k in range(d)):
+            xis.h_float = float(h_per_dim[0])
+        else:
+            xis.h_float = float(h_per_dim[0])  # legacy attr, value is one of them
+        xis.h_per_dim = h_per_dim
+        xis.mtot_per_dim = tuple(int(m) for m in mtot_per_dim)
+
         # NUFFT Setup for training points
-        OUT = (mtot,) * d
+        OUT = tuple(mtot_per_dim)
         xcen = torch.zeros(d, device=device, dtype=rdtype)
-        
-        # Compute spectral density values
+
+        # Compute spectral density and weights
         spectral_vals = self.kernel.spectral_density(xis).to(dtype=cdtype)
-        ws = torch.sqrt(spectral_vals * (h ** d))
-        ws = ws.to(dtype=cdtype)
-        
-        # Setup for training points - use our NUFFT class
-        nufft_op = NUFFT(x, xcen, h, nufft_eps, cdtype=cdtype, device=device)
-    
+        cell_vol = torch.prod(h_per_dim)
+        ws = torch.sqrt(spectral_vals * cell_vol).to(dtype=cdtype)
+
+        # Setup for training points - use our NUFFT class (per-dim h)
+        nufft_op = NUFFT(x, xcen, h_per_dim, nufft_eps, cdtype=cdtype, device=device)
+
         # Compute right-hand side for mean
         right_hand_side = ws * nufft_op.type1(y, out_shape=OUT).reshape(-1)
-    
+
         # Setup Toeplitz operator
-        m_conv = (mtot - 1) // 2
-        v_kernel = compute_convolution_vector_vectorized_dD(m_conv, x, h).to(dtype=cdtype)
+        m_conv = [(m_k - 1) // 2 for m_k in mtot_per_dim]
+        v_kernel = compute_convolution_vector_vectorized_dD(m_conv, x, h_per_dim).to(dtype=cdtype)
         toeplitz = ToeplitzND(v_kernel, force_pow2=False)
-        
+
         # Create A_mean operator directly using the new function
         A_mean = create_A_mean(ws, toeplitz, sigmasq_scalar, cdtype)
         center = tuple(((torch.tensor(v_kernel.shape, device=device) - 1) // 2).tolist())
@@ -869,7 +1109,7 @@ class EFGPND(nn.Module):
                 mean_M_inv = create_jacobi_precond(ws, sigmasq_scalar, diag_scale=diag_scale)
             elif precond_type == "kronecker":
                 mean_M_inv = create_kronecker_precond(
-                    ws, v_kernel, sigmasq_scalar, d=d, mtot_1d=mtot,
+                    ws, v_kernel, sigmasq_scalar, d=d, mtot_1d=mtot_per_dim,
                     device=device, cdtype=cdtype, rdtype=rdtype,
                 )
             else:
@@ -983,17 +1223,24 @@ class EFGPND(nn.Module):
             xis = self._xis
             ws = self._ws
             toeplitz = self._toeplitz
-            h_float = xis.h_float
-            h = torch.tensor(h_float, device=device, dtype=rdtype)
-            mtot = int(xis.shape[0]**(1/d))
-            
+            # Per-dim grid info was stashed on xis during fit; fall back to
+            # legacy isotropic reconstruction for old caches.
+            if hasattr(xis, 'h_per_dim') and hasattr(xis, 'mtot_per_dim'):
+                h = xis.h_per_dim.to(device=device, dtype=rdtype)
+                mtot_per_dim = list(xis.mtot_per_dim)
+            else:
+                h_float = xis.h_float
+                mtot = int(xis.shape[0] ** (1 / d))
+                h = torch.full((d,), float(h_float), device=device, dtype=rdtype)
+                mtot_per_dim = [mtot] * d
+
             # Create operator functions using the new approach
             A_var = create_A_var(ws, toeplitz, sigmasq_scalar, cdtype)
-        
+
             # Setup for prediction
             xcen = torch.zeros(d, device=device, dtype=rdtype)
-            OUT = (mtot,) * d
-            
+            OUT = tuple(mtot_per_dim)
+
             # Setup NUFFT for prediction points using our NUFFT class
             nufft_op = NUFFT(x_new, xcen, h, nufft_eps, cdtype=cdtype, device=device)
             
@@ -1215,31 +1462,42 @@ class EFGPND(nn.Module):
         
         history['sigmasq'] = [float(self.sigmasq.item())]
         
-        # Derive max_mtot_1d from ls_design if provided
+        # Derive max_mtot_1d from ls_design if provided. ls_design is treated
+        # as a single isotropic stand-in lengthscale; for ARD we still pick a
+        # single cap that applies per-axis.
         if ls_design is not None and max_mtot_1d is None:
             L_val = torch.max(torch.max(self.x, dim=0).values - torch.min(self.x, dim=0).values)
             L_val = float(L_val) if float(L_val) > 1e-9 else 1.0
             from copy import deepcopy
             ker_design = deepcopy(self.kernel)
-            ker_design.set_hyper('lengthscale', float(ls_design))
+            if hasattr(ker_design, 'lengthscales'):
+                ker_design.set_lengthscales([float(ls_design)] * ker_design.dimension)
+            else:
+                ker_design.set_hyper('lengthscale', float(ls_design))
             _, _, max_mtot_1d = get_xis(
                 kernel_obj=ker_design, eps=self.eps, L=L_val,
                 use_integral=True, l2scaled=False,
             )
             print(f"max_mtot_1d = {max_mtot_1d} (from ls_design={ls_design:g}, eps={self.eps:g})")
 
-        # Build frozen quadrature grid if requested
+        # Build frozen quadrature grid if requested. For ARD kernels this is a
+        # per-dim list; for isotropic kernels it stays scalar (legacy form).
         if frozen_grid is None and freeze_quad_grid:
-            L_val = torch.max(torch.max(self.x, dim=0).values - torch.min(self.x, dim=0).values)
-            L_val = float(L_val) if float(L_val) > 1e-9 else 1.0
-            xis_1d_frozen, h_frozen, mtot_frozen = get_xis(
-                kernel_obj=self.kernel, eps=self.eps, L=L_val,
-                use_integral=True, l2scaled=False,
+            x_dev = self.x.to(device=device, dtype=rdtype)
+            xis_1d_list_frozen, h_per_dim_frozen, mtot_per_dim_frozen, _ = _resolve_grid(
+                self.kernel, x_dev, self.eps,
+                frozen_grid=None, max_mtot_1d=None,
+                rdtype=rdtype, device=device,
             )
-            frozen_grid = (xis_1d_frozen.to(device=device, dtype=rdtype), float(h_frozen))
-            print(f"Frozen quadrature grid: mtot_1d={mtot_frozen}, h={h_frozen:.6g} (built from eps={self.eps:g} at init hypers)")
+            frozen_grid = (xis_1d_list_frozen, h_per_dim_frozen)
+            print(f"Frozen quadrature grid: mtot_per_dim={tuple(mtot_per_dim_frozen)}, "
+                  f"h_per_dim={h_per_dim_frozen.tolist()} (built from eps={self.eps:g} at init hypers)")
         elif frozen_grid is not None:
-            print(f"Using user-supplied frozen grid: mtot_1d={frozen_grid[0].numel()}, h={float(frozen_grid[1]):.6g}")
+            xis_1d_fg, h_fg = frozen_grid
+            if isinstance(xis_1d_fg, (list, tuple)):
+                print(f"Using user-supplied frozen grid: mtot_per_dim={tuple(t.numel() for t in xis_1d_fg)}")
+            else:
+                print(f"Using user-supplied frozen grid: mtot_1d={xis_1d_fg.numel()}, h={float(h_fg):.6g}")
 
         start_time = time.time()
         print(f"Optimizing hyperparameters using {optimizer if isinstance(optimizer, str) else optimizer.__class__.__name__}")
@@ -1298,15 +1556,20 @@ class EFGPND(nn.Module):
             
             # Apply constraints
             with torch.no_grad():
-                # Apply minimum lengthscale constraint
-                try:
-                    ls_idx = self._gp_params.hypers_names.index('lengthscale')
+                # Apply minimum lengthscale constraint to every hyper named
+                # 'lengthscale' or 'lengthscale_*' (covers isotropic SE/Matern
+                # and ARD). Silent skip if no such hypers.
+                ls_indices = [
+                    i for i, n in enumerate(self._gp_params.hypers_names)
+                    if n == 'lengthscale' or n.startswith('lengthscale_')
+                ]
+                if ls_indices:
                     min_val = torch.tensor(min_lengthscale, device=device, dtype=rdtype)
-                    if torch.exp(self._gp_params.raw[ls_idx]) < min_val:
-                        self._gp_params.raw[ls_idx].copy_(torch.log(min_val))
-                except (ValueError, IndexError) as e:
-                    if verbose:
-                        print(f"Note: Could not apply lengthscale constraint: {e}")
+                    for ls_idx in ls_indices:
+                        if torch.exp(self._gp_params.raw[ls_idx]) < min_val:
+                            self._gp_params.raw[ls_idx].copy_(torch.log(min_val))
+                elif verbose:
+                    print("Note: no 'lengthscale*' hyper to apply min constraint to")
             
             # Log progress
             if it % log_interval == 0 or it == max_iters - 1:
@@ -1508,32 +1771,45 @@ class ToeplitzND:
             
         return y
 
-def compute_convolution_vector_vectorized_dD(m: int, x: torch.Tensor, h: float) -> torch.Tensor:
+def compute_convolution_vector_vectorized_dD(m, x: torch.Tensor, h) -> torch.Tensor:
     """
     Multi‑D type‑1 NUFFT convolution vector:
       v[k1,...,kd] = sum_n exp(2πi <k, x_n>)
+
+    ``m`` and ``h`` may be scalars (isotropic) or length-d sequences/tensors
+    (per-dim). The output grid has shape ``(4*m_k + 1)`` per dimension.
     """
     device = x.device
     dtype_real = x.dtype
     dtype_cmplx = _cmplx(dtype_real)
-    
+
     if x.ndim == 1:
         x = x[:, None]
     N, d = x.shape
-    
+
+    # Normalize m to a length-d tuple of ints
+    if hasattr(m, '__len__'):
+        m_list = [int(mi) for mi in m]
+    elif torch.is_tensor(m) and m.ndim > 0:
+        m_list = [int(mi) for mi in m.tolist()]
+    else:
+        m_list = [int(m)] * d
+    if len(m_list) != d:
+        raise ValueError(f"m must be scalar or length-{d}, got length {len(m_list)}")
+
     # Create a temporary center point
     xcen = torch.zeros(d, device=device, dtype=dtype_real)
-    
+
     # Create all weights = 1 + 0i
     c = torch.ones(N, dtype=dtype_cmplx, device=device)
-    
+
     # Output grid size in each of the d dims
-    OUT = tuple([4*m + 1] * d)
-    
-    # Use our NUFFT class
+    OUT = tuple(4 * mk + 1 for mk in m_list)
+
+    # Use our NUFFT class (h may be scalar or per-dim — NUFFT handles both)
     nufft_op = NUFFT(x, xcen, h, eps=6e-8, cdtype=dtype_cmplx, device=device)
     v = nufft_op.type1(c, out_shape=OUT)
-    
+
     return v
 
 class NUFFT:
@@ -1548,11 +1824,12 @@ class NUFFT:
     def __init__(self, x, xcen, h, eps, cdtype=None, device=None):
         """
         Initialize the NUFFT operator.
-        
+
         Args:
             x: Input points tensor of shape (N, d)
             xcen: Center of domain, tensor of shape (d,)
-            h: Grid spacing parameter
+            h: Grid spacing — scalar (isotropic) OR length-d tensor/sequence
+                (per-dim spacing for anisotropic / ARD grids).
             eps: Accuracy parameter for NUFFT
             cdtype: Complex data type (computed from x.dtype if not provided)
             device: Device for computation (uses x.device if not provided)
@@ -1561,10 +1838,22 @@ class NUFFT:
         self.dtype = x.dtype
         self.cdtype = cdtype or _cmplx(self.dtype)
         self.eps = eps
-        
+
+        # Normalize h to a length-d tensor on the right device/dtype, broadcasting
+        # scalar inputs for isotropic back-compat.
+        d_in = x.shape[1] if x.ndim > 1 else 1
+        h_t = torch.as_tensor(h, device=self.device, dtype=self.dtype)
+        if h_t.ndim == 0:
+            h_t = h_t.expand(d_in)
+        if h_t.numel() != d_in:
+            raise ValueError(
+                f"NUFFT got h of size {h_t.numel()} but x has {d_in} dims"
+            )
+
         # Compute phi for the input points: (d, N) array of phases
         TWO_PI = 2 * math.pi
-        self.phi = (TWO_PI * h * (x - xcen)).T.contiguous().to(device=self.device, dtype=self.dtype)
+        # Per-dim broadcast: each column of x scaled by its own h_k
+        self.phi = (TWO_PI * h_t.unsqueeze(0) * (x - xcen)).T.contiguous().to(device=self.device, dtype=self.dtype)
         self.d = self.phi.shape[0]  # Dimensionality
         
     def type1(self, vals, out_shape):
@@ -1664,11 +1953,75 @@ class NUFFT:
                 eps=self.eps, isign=+1, modeord=False
             )
 
+def sample_gp_efgpnd(
+    x: torch.Tensor,
+    kernel,
+    eps: float = 1e-3,
+    *,
+    nufft_eps: float = 6e-8,
+    seed: Optional[int] = None,
+    max_mtot_1d: Optional[int] = None,
+    frozen_grid: Optional[Tuple[torch.Tensor, float]] = None,
+) -> torch.Tensor:
+    """
+    Sample from a GP *prior* using EFGP's deterministic spectral quadrature.
+
+    Draws β ~ CN(0, 1) on the same frequency grid EFGPND integrates against
+    and evaluates
+
+        f(x) = sqrt(2) * Re[ Σ_s w_s β_s exp(2πi ξ_s · x) ]
+
+    with w_s = sqrt(S(ξ_s) · Π_k h_k). Induced covariance matches the
+    quadrature approximation of k, which → k as ``eps`` → 0. Uses NUFFT
+    so cost is O(M log M + N), scaling to n in the millions.
+
+    Args:
+        x: points to evaluate the sample at, shape (n,) or (n, d)
+        kernel: an efgpnd-compatible kernel with ``.spectral_density(xi)``
+            (e.g. ``SquaredExponential``). Hypers are read from ``kernel``.
+        eps: quadrature accuracy (same meaning as in EFGPND)
+        nufft_eps: NUFFT accuracy
+        seed: optional RNG seed for β
+        max_mtot_1d: optional per-axis cap on grid size
+        frozen_grid: reuse a previously resolved ``(xis_1d_list, h_per_dim)``
+
+    Returns:
+        Real tensor of shape (n,) — a prior sample tabulated at ``x``.
+    """
+    if x.ndim == 1:
+        x = x.unsqueeze(-1)
+    device = x.device
+    rdtype = x.dtype
+    cdtype = _cmplx(rdtype)
+    d = x.shape[1]
+
+    xis_1d_list, h_per_dim, mtot_per_dim, xis_flat = _resolve_grid(
+        kernel, x, eps,
+        frozen_grid=frozen_grid, max_mtot_1d=max_mtot_1d,
+        rdtype=rdtype, device=device,
+    )
+    cell_vol = torch.prod(h_per_dim)
+    ws = torch.sqrt(kernel.spectral_density(xis_flat).to(dtype=cdtype) * cell_vol)
+
+    gen = torch.Generator(device=device)
+    if seed is not None:
+        gen.manual_seed(int(seed))
+    M = ws.numel()
+    beta_r = torch.randn(M, generator=gen, dtype=rdtype, device=device)
+    beta_i = torch.randn(M, generator=gen, dtype=rdtype, device=device)
+    beta = ((beta_r + 1j * beta_i) / math.sqrt(2.0)).to(cdtype)
+
+    xcen = torch.zeros(d, device=device, dtype=rdtype)
+    nufft_op = NUFFT(x, xcen, h_per_dim, nufft_eps, cdtype=cdtype, device=device)
+    f_complex = nufft_op.type2(ws * beta, out_shape=tuple(mtot_per_dim))
+    return math.sqrt(2.0) * f_complex.real
+
+
 def setup_nufft(x, xcen, h, nufft_eps, cdtype):
     """
-    DEPRECATED: Use NUFFT class instead. 
+    DEPRECATED: Use NUFFT class instead.
     This function is kept for backward compatibility but will be removed in a future version.
-    
+
     Creates a NUFFT operator and returns the phi (phase) and transform functions.
     """
     # Create a NUFFT object
@@ -1827,7 +2180,7 @@ def create_kronecker_precond(ws, v_kernel, sigmasq_scalar, d, mtot_1d,
     Builds M^{-1} that is EXACT for A = (⊗_k H_k) + sigma^2 I, where
     H_k = D_k T_k D_k with
       - D_k : 1D spectral factor of D=diag(ws) under a rank-1 separation
-              (exact for product kernels: SE, product-Matérn);
+              (exact for product kernels: SE, product-Matérn, ARD-SE);
       - T_k : 1D Toeplitz extracted as the slice of v_kernel along axis k
               with all other axes pinned at the origin (k_j = 0, j != k).
 
@@ -1836,25 +2189,38 @@ def create_kronecker_precond(ws, v_kernel, sigmasq_scalar, d, mtot_1d,
       (ii) the data Toeplitz T is separable (holds for tensor-grid data,
            degrades gracefully for well-spread data).
 
-    Setup cost:  d dense m×m Hermitian eigendecompositions  (O(d * m^3))
-    Apply cost:  2d mode-k dense mat-vecs, O(d * M * m) per apply
-                 (compare: one FFT-based A_mean apply is O(M log m)).
+    Setup cost:  d dense m_k×m_k Hermitian eigendecompositions
+                 (O(Σ_k m_k^3))
+    Apply cost:  2d mode-k dense mat-vecs (O(M · max_k m_k) per apply)
 
     Parameters
     ----------
     ws            : (M,) complex, spectral weights on the tensor grid.
-    v_kernel      : (L,)*d complex, the precomputed convolution vector.
+    v_kernel      : (L_1, ..., L_d) complex, precomputed convolution vector.
+                    Need not be isotropic-shaped.
     sigmasq_scalar: scalar noise variance (tensor or python float).
     d             : int, spatial dimension.
-    mtot_1d       : int, 1D frequency-grid size (so M = mtot_1d ** d).
+    mtot_1d       : int (isotropic) or length-d sequence (per-dim) — the
+                    1D frequency-grid size in each dimension. ``M = ∏_k m_k``.
 
     Returns
     -------
     M_inv(v) : callable applying the preconditioner to (M,) or (B, M).
     """
-    m = int(mtot_1d)
-    M_total = m ** d
-    assert ws.numel() == M_total, f"ws size {ws.numel()} != m^d = {M_total}"
+    # Normalize mtot_1d to a length-d list of ints
+    if hasattr(mtot_1d, '__len__'):
+        m_list = [int(mi) for mi in mtot_1d]
+    elif torch.is_tensor(mtot_1d) and mtot_1d.ndim > 0:
+        m_list = [int(mi) for mi in mtot_1d.tolist()]
+    else:
+        m_list = [int(mtot_1d)] * d
+    if len(m_list) != d:
+        raise ValueError(f"mtot_1d must be scalar or length-{d}, got length {len(m_list)}")
+
+    M_total = 1
+    for mk in m_list:
+        M_total *= mk
+    assert ws.numel() == M_total, f"ws size {ws.numel()} != prod(m_k) = {M_total}"
     if device is None:
         device = ws.device
 
@@ -1864,9 +2230,9 @@ def create_kronecker_precond(ws, v_kernel, sigmasq_scalar, d, mtot_1d,
         sigsq = float(sigmasq_scalar)
 
     # --- 1D factorisation of ws: ws[i1,...,id] = ∏_k D_k[i_k] (exact for product kernels)
-    ws_nd = ws.view(*(m,) * d).to(cdtype)
-    ctr_ws = m // 2  # origin index along each axis (mtot_1d is odd for symmetric grids)
-    idx_ws_ctr = (ctr_ws,) * d
+    ws_nd = ws.view(*tuple(m_list)).to(cdtype)
+    ctr_ws_per_dim = [m_k // 2 for m_k in m_list]  # origin index along each axis
+    idx_ws_ctr = tuple(ctr_ws_per_dim)
     ws_ctr = ws_nd[idx_ws_ctr]
     # Guard against zero center (shouldn't happen for well-posed spectral densities)
     if ws_ctr.abs().item() == 0.0:
@@ -1874,24 +2240,24 @@ def create_kronecker_precond(ws, v_kernel, sigmasq_scalar, d, mtot_1d,
     norm = ws_ctr ** ((d - 1) / d)   # complex fractional power; fine for real-positive ws
     Ds = []
     for k in range(d):
-        slc = [ctr_ws] * d
+        slc = list(ctr_ws_per_dim)
         slc[k] = slice(None)
         D_k = (ws_nd[tuple(slc)] / norm).to(cdtype)
         Ds.append(D_k)
 
-    # --- Extract 1D convolution vectors from v_kernel (length L = 2m-1 for odd m)
+    # --- Extract 1D convolution vectors from v_kernel (length L_k = 2m_k-1 for odd m_k).
+    # v_kernel may be anisotropic in shape; we handle each axis independently.
     v_shape = v_kernel.shape
-    if any(s != v_shape[0] for s in v_shape):
-        raise ValueError(f"Expected isotropic v_kernel shape, got {v_shape}")
-    L = v_shape[0]
-    ctr_v = (L - 1) // 2
-    # This is the offset s.t. v_1d[ctr_v] corresponds to k_k = 0.
+    if len(v_shape) != d:
+        raise ValueError(f"v_kernel ndim {len(v_shape)} != d={d}")
+    ctr_v_per_dim = [(L_k - 1) // 2 for L_k in v_shape]
+    # offsets s.t. along axis k, v_1d[ctr_v_per_dim[k]] corresponds to k_k = 0.
 
     # Normalise the 1D v-slices so that ⊗_k T_k reproduces T on the origin
     # (i.e. T[0,...,0] = ∏_k T_k[0,0]).  Without this, each T_k carries an
     # extra factor of v[0]^{(d-1)/d}, which breaks the Kronecker identity on
     # separable data.
-    v_ctr_val = v_kernel[(ctr_v,) * d].to(cdtype)
+    v_ctr_val = v_kernel[tuple(ctr_v_per_dim)].to(cdtype)
     if v_ctr_val.abs().item() == 0.0:
         v_ctr_val = v_ctr_val + torch.finfo(rdtype).tiny
     v_norm = v_ctr_val ** ((d - 1) / d)
@@ -1899,12 +2265,14 @@ def create_kronecker_precond(ws, v_kernel, sigmasq_scalar, d, mtot_1d,
     Vs = []
     Lams = []
     for k in range(d):
-        slc = [ctr_v] * d
+        slc = list(ctr_v_per_dim)
         slc[k] = slice(None)
-        v_1d = (v_kernel[tuple(slc)].to(cdtype)) / v_norm  # (L,)
-        # Build 1D Toeplitz of size m×m with T_k[a,b] = v_1d[(a-b) + ctr_v].
-        a = torch.arange(m, device=device)
-        T_k = v_1d[(a[:, None] - a[None, :]) + ctr_v]
+        v_1d = (v_kernel[tuple(slc)].to(cdtype)) / v_norm  # (L_k,)
+        # Build 1D Toeplitz of size m_k×m_k with T_k[a,b] = v_1d[(a-b) + ctr_v_k].
+        m_k = m_list[k]
+        ctr_v_k = ctr_v_per_dim[k]
+        a = torch.arange(m_k, device=device)
+        T_k = v_1d[(a[:, None] - a[None, :]) + ctr_v_k]
         # H_k = D_k T_k D_k (Hermitian PSD up to approximation/round-off)
         H_k = Ds[k][:, None] * T_k * Ds[k][None, :]
         H_k = 0.5 * (H_k + H_k.conj().T)
@@ -1913,10 +2281,10 @@ def create_kronecker_precond(ws, v_kernel, sigmasq_scalar, d, mtot_1d,
         Vs.append(V_k.to(cdtype))
 
     # --- Build diagonal in Kronecker eigen-basis: (∏_k Λ_k(i_k)) + σ²
-    lam_prod = torch.ones(*(m,) * d, device=device, dtype=rdtype)
+    lam_prod = torch.ones(*tuple(m_list), device=device, dtype=rdtype)
     for k in range(d):
         shape = [1] * d
-        shape[k] = m
+        shape[k] = m_list[k]
         lam_prod = lam_prod * Lams[k].view(shape)
     diag_inv = (1.0 / (lam_prod + sigsq)).to(cdtype)
 
@@ -1940,9 +2308,9 @@ def create_kronecker_precond(ws, v_kernel, sigmasq_scalar, d, mtot_1d,
         is_batch = v.ndim > 1
         if is_batch:
             B = v.shape[0]
-            t = v.to(cdtype).reshape(B, *(m,) * d)
+            t = v.to(cdtype).reshape(B, *tuple(m_list))
         else:
-            t = v.to(cdtype).reshape(*(m,) * d)
+            t = v.to(cdtype).reshape(*tuple(m_list))
         t = _apply_kron(t, Vs, hermitian=True)
         t = t * diag_inv
         t = _apply_kron(t, Vs, hermitian=False)

@@ -103,7 +103,7 @@ def _build_local_spectral_state(
     conv_shape = tuple(2 * n - 1 for n in out_shape)
     ones = torch.ones(X_ell.shape[0], device=device, dtype=cdtype)
     v = nufft_op.type1(ones, out_shape=conv_shape)
-    toeplitz = ToeplitzND(v.to(dtype=cdtype), force_pow2=True)
+    toeplitz = ToeplitzND(v.to(dtype=cdtype), force_pow2=False)
 
     def fadj(z):
         return nufft_op.type1(z, out_shape=out_shape).reshape(-1)
@@ -154,7 +154,7 @@ def _solve_single_gp(
     delta_c = delta.to(dtype=cdtype)
     conv_shape = tuple(2 * n - 1 for n in spec.out_shape)
     v = spec.nufft_op.type1(delta_c, out_shape=conv_shape)
-    T = ToeplitzND(v.to(dtype=cdtype), force_pow2=True)
+    T = ToeplitzND(v.to(dtype=cdtype), force_pow2=False)
 
     # RHS: ws * F^* z
     rhs = spec.ws * spec.fadj(z.to(dtype=cdtype))
@@ -193,7 +193,7 @@ def _solve_single_gp_with_probes(
     delta_c = delta.to(dtype=cdtype)
     conv_shape = tuple(2 * n - 1 for n in spec.out_shape)
     v = spec.nufft_op.type1(delta_c, out_shape=conv_shape)
-    T = ToeplitzND(v.to(dtype=cdtype), force_pow2=True)
+    T = ToeplitzND(v.to(dtype=cdtype), force_pow2=False)
 
     # Stack z and probes: (1 + n_probes, n)
     Z = torch.cat([z.unsqueeze(0), probes], dim=0).to(dtype=cdtype)
@@ -274,7 +274,7 @@ def _blockcd_feature_solve(
         delta_c = delta.to(dtype=cdtype)
         conv_shape_g = tuple(2 * s - 1 for s in spec_g.out_shape)
         v_g = spec_g.nufft_op.type1(delta_c, out_shape=conv_shape_g)
-        T_g = ToeplitzND(v_g.to(dtype=cdtype), force_pow2=True)
+        T_g = ToeplitzND(v_g.to(dtype=cdtype), force_pow2=False)
 
         # Batched RHS: ws * F^* z_g for each batch
         rhs_g = torch.zeros(B, m, dtype=cdtype, device=device)
@@ -301,7 +301,7 @@ def _blockcd_feature_solve(
             delta_ell = delta[idx].to(dtype=cdtype)
             conv_shape_ell = tuple(2 * s - 1 for s in spec_ell.out_shape)
             v_ell = spec_ell.nufft_op.type1(delta_ell, out_shape=conv_shape_ell)
-            T_ell = ToeplitzND(v_ell.to(dtype=cdtype), force_pow2=True)
+            T_ell = ToeplitzND(v_ell.to(dtype=cdtype), force_pow2=False)
 
             m_ell = spec_ell.ws.numel()
             rhs_ell = torch.zeros(B, m_ell, dtype=cdtype, device=device)
@@ -497,7 +497,7 @@ def _compute_schur_mstep_gradient(
     delta_c = delta.to(dtype=cdtype)
     conv_shape = tuple(2 * s - 1 for s in spec_g.out_shape)
     v_all = spec_g.nufft_op.type1(delta_c, out_shape=conv_shape)
-    T_all = ToeplitzND(v_all.to(dtype=cdtype), force_pow2=True)
+    T_all = ToeplitzND(v_all.to(dtype=cdtype), force_pow2=False)
 
     T_locs = []
     Dh_halfs = []
@@ -507,7 +507,7 @@ def _compute_schur_mstep_gradient(
         delta_ell = delta[idx].to(dtype=cdtype)
         conv_shape_ell = tuple(2 * s - 1 for s in spec_ell.out_shape)
         v_ell = spec_ell.nufft_op.type1(delta_ell, out_shape=conv_shape_ell)
-        T_locs.append(ToeplitzND(v_ell.to(dtype=cdtype), force_pow2=True))
+        T_locs.append(ToeplitzND(v_ell.to(dtype=cdtype), force_pow2=False))
 
     # All locations share the same kernel, so Dh_half is the same
     Dh_half = Dh_halfs[0]
@@ -887,7 +887,7 @@ def _compute_blockcd_mstep_gradient(
     delta_c_g = delta.to(dtype=cdtype)
     conv_shape = tuple(2 * n - 1 for n in spec_g.out_shape)
     v_g = spec_g.nufft_op.type1(delta_c_g, out_shape=conv_shape)
-    T_g = ToeplitzND(v_g.to(dtype=cdtype), force_pow2=True)
+    T_g = ToeplitzND(v_g.to(dtype=cdtype), force_pow2=False)
 
     def A_feat_g(u):
         return u + spec_g.ws * T_g(spec_g.ws * u)
@@ -938,7 +938,7 @@ def _compute_blockcd_mstep_gradient(
 
         conv_shape_ell = tuple(2 * n - 1 for n in spec_ell.out_shape)
         v_ell = spec_ell.nufft_op.type1(delta_ell, out_shape=conv_shape_ell)
-        T_ell = ToeplitzND(v_ell.to(dtype=cdtype), force_pow2=True)
+        T_ell = ToeplitzND(v_ell.to(dtype=cdtype), force_pow2=False)
 
         def A_feat_ell(u, T=T_ell, s=spec_ell):
             return u + s.ws * T(s.ws * u)

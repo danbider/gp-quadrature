@@ -353,7 +353,7 @@ def _build_spectral_state(
 
     m_conv = (mtot - 1) // 2
     v_kernel = compute_convolution_vector_vectorized_dD(m_conv, X, h).to(dtype=cdtype)
-    toeplitz = ToeplitzND(v_kernel, force_pow2=True)
+    toeplitz = ToeplitzND(v_kernel, force_pow2=False)
     Dprime = (h**d * kernel.spectral_grad(xis)).to(device=device, dtype=cdtype)
 
     out_shape = (mtot,) * d
@@ -394,7 +394,7 @@ def _build_weighted_toeplitz(
     weights = delta.to(dtype=spectral.ws.dtype, device=delta.device).flatten()
     conv_shape = tuple(2 * n - 1 for n in spectral.out_shape)
     v_weighted = spectral.nufft_op.type1(weights, out_shape=conv_shape)
-    return ToeplitzND(v_weighted.to(dtype=spectral.ws.dtype), force_pow2=True)
+    return ToeplitzND(v_weighted.to(dtype=spectral.ws.dtype), force_pow2=False)
 
 
 def _make_sigma_apply(
