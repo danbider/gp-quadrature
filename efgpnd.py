@@ -1138,6 +1138,11 @@ class EFGPND(nn.Module):
         self._xis = xis
         self._ws = ws
         self._toeplitz = toeplitz
+        # Cache the mean preconditioner so the stochastic-variance CG can reuse
+        # it. A_var = A_mean / sigma^2 shares A_mean's eigenvectors, so the same
+        # M_inv preconditions both equally well (CG convergence is invariant to
+        # the scalar 1/sigma^2). None when preconditioning is disabled.
+        self._mean_M_inv = mean_M_inv
         self._fitted = True
         self._update_param_cache()
     
@@ -1259,8 +1264,16 @@ class EFGPND(nn.Module):
                         xis=xis,
                         ws=ws,
                         A_var=A_var,
-                        cg_tol=self.opts.get("cg_tolerance", 1e-4),
-                        max_cg_iter=self.opts.get("max_cg_iterations", 1000),
+                        # The stochastic variance is a J-probe Monte-Carlo
+                        # estimate, so its per-probe CG need not be solved as
+                        # tightly as the mean. var_cg_tolerance / var_max_cg_iterations
+                        # let the (broadband-RHS, hence slow) variance solve use a
+                        # looser tol / lower iter cap than the mean; they default
+                        # to the mean's settings for backward compatibility.
+                        cg_tol=self.opts.get("var_cg_tolerance",
+                                             self.opts.get("cg_tolerance", 1e-4)),
+                        max_cg_iter=self.opts.get("var_max_cg_iterations",
+                                                  self.opts.get("max_cg_iterations", 1000)),
                         variance_method=variance_method,
                         h=h,
                         xcen=xcen,
@@ -1268,7 +1281,8 @@ class EFGPND(nn.Module):
                         nufft_eps=nufft_eps,
                         device=device,
                         rdtype=rdtype,
-                        cdtype=cdtype
+                        cdtype=cdtype,
+                        M_inv=getattr(self, "_mean_M_inv", None),
                     )
                     ytrg["var"] = variance
                 else:
@@ -1347,6 +1361,74 @@ class EFGPND(nn.Module):
         mean, _ = self.predict(x_new, return_variance=False)
         samples = mean.unsqueeze(1) + L @ Z
         return samples.detach().numpy()
+
+    def predict_pathwise(
+        self,
+        x_new: torch.Tensor,
+        *,
+        n_samples: int = 64,
+        return_samples: bool = False,
+        seed: Optional[int] = None,
+        nufft_eps: Optional[float] = None,
+    ):
+        """
+        Posterior variance at ``x_new`` via pathwise (Matheron) conditioning.
+
+        Estimates Var(f(x*)) as the empirical variance of ``n_samples`` posterior
+        function draws. Each draw costs a single *mean-type* CG solve whose
+        right-hand side is spectrally smooth, so it converges in mean-like
+        iteration counts -- far better conditioned at small noise than the
+        broadband solve behind ``predict(variance_method='stochastic')``.
+        See ``scratch/pathwise_variance.tex``.
+
+        Returns ``var`` of shape (B,), or ``(var, samples)`` with samples of
+        shape (n_samples, B) when ``return_samples=True``. Outputs are in the
+        model's (standardised) units, like :meth:`predict`.
+        """
+        self._compute_common_parameters(nufft_eps=nufft_eps)
+        device, rdtype = self.x.device, self.x.dtype
+        cdtype = _cmplx(rdtype)
+        sigmasq = float(self._gp_params.sig2)
+        nufft_eps = nufft_eps if nufft_eps is not None else self.nufft_eps
+
+        ws, toeplitz, xis = self._ws, self._toeplitz, self._xis
+        h = xis.h_per_dim.to(device=device, dtype=rdtype)
+        OUT = tuple(int(m) for m in xis.mtot_per_dim)
+        n, d = self.x.shape
+        x_new = x_new.to(device=device, dtype=rdtype)
+        S = int(n_samples)
+
+        A_mean = create_A_mean(ws, toeplitz, sigmasq, cdtype)
+        M_inv = getattr(self, "_mean_M_inv", None)
+        xcen = torch.zeros(d, device=device, dtype=rdtype)
+        nufft_x = NUFFT(self.x, xcen, h, nufft_eps, cdtype=cdtype, device=device)
+        nufft_new = NUFFT(x_new, xcen, h, nufft_eps, cdtype=cdtype, device=device)
+
+        gen = None if seed is None else torch.Generator(device=device).manual_seed(int(seed))
+        randn = lambda *s: torch.randn(*s, generator=gen, device=device, dtype=rdtype)
+
+        # Prior weights shared between the data- and test-evaluations of each draw.
+        zeta = (randn(S, ws.numel()) + 1j * randn(S, ws.numel())).to(cdtype) / math.sqrt(2.0)
+        coeff = ws[None, :] * zeta
+        SQ2 = math.sqrt(2.0)
+
+        # Matheron update is the EFGP posterior mean for residual r = -(f_prior(X) + eps),
+        # a *smooth*-RHS mean solve (the posterior variance is data-independent, so y=0).
+        prior_x = SQ2 * nufft_x.type2(coeff, out_shape=OUT).real          # (S, n)
+        r = (-(prior_x + math.sqrt(sigmasq) * randn(S, n))).to(cdtype)
+        rhs = ws[None, :] * nufft_x.type1(r, out_shape=OUT).reshape(S, -1)  # D F* r
+        beta = ConjugateGradients(
+            A_mean, rhs, x0=torch.zeros_like(rhs),
+            tol=self.opts.get("cg_tolerance", 1e-4),
+            max_iter=self.opts.get("max_cg_iterations", 1000),
+            early_stopping=True, M_inv_apply=M_inv,
+        ).solve()
+
+        # f_post = f_prior + update on x_new. Both share the D-weight and real
+        # part, so fold them into a single batched NUFFT: f_post = Re[F (D(√2 ζ + β))].
+        samples = nufft_new.type2(ws[None, :] * (SQ2 * zeta + beta), out_shape=OUT).real
+        var = samples.var(dim=0)
+        return (var, samples) if return_samples else var
 
     def _compute_log_marginal(self, beta, ws, sigmasq, toeplitz, device, rdtype, n):
         """
@@ -1807,7 +1889,7 @@ def compute_convolution_vector_vectorized_dD(m, x: torch.Tensor, h) -> torch.Ten
     OUT = tuple(4 * mk + 1 for mk in m_list)
 
     # Use our NUFFT class (h may be scalar or per-dim — NUFFT handles both)
-    nufft_op = NUFFT(x, xcen, h, eps=6e-8, cdtype=dtype_cmplx, device=device)
+    nufft_op = NUFFT(x, xcen, h, eps=1e-6, cdtype=dtype_cmplx, device=device)
     v = nufft_op.type1(c, out_shape=OUT)
 
     return v
@@ -2322,28 +2404,36 @@ def create_kronecker_precond(ws, v_kernel, sigmasq_scalar, d, mtot_1d,
 
 
 # for stochastic variance estimation
-def diag_sums_nd(A_apply, J, xis_flat, max_cg_iter, cg_tol, ws):
+def diag_sums_nd(A_apply, J, xis_flat, max_cg_iter, cg_tol, ws, M_inv=None):
     """
     Computing c[r] where r is a vector offset for stochastic variance estimation.
     Uses Hutchinson's method with randomized probing.
+
+    M_inv : optional callable
+        Preconditioner for the A_var solve. A_var = A_mean / sigma^2 shares
+        A_mean's spectrum up to a scalar, so the mean preconditioner applies
+        directly. Without it this CG is unpreconditioned and converges slowly
+        for small noise (it would run to max_cg_iter every probe).
     """
     N, d_loc = xis_flat.shape
     M_loc = round(N ** (1 / d_loc))
     assert M_loc ** d_loc == N, "xis must lie on tensor grid"
-    
+
     # Create Rademacher random vectors
     etas = (torch.randint(0, 2, (J, N), device=xis_flat.device) * 2 - 1).to(xis_flat.dtype)
     rhs = ws[None, :] * etas
-    
+
     # Use BatchConjugateGradients to solve the system
-    us = ConjugateGradients(
-        A_apply, 
-        rhs, 
+    cg = ConjugateGradients(
+        A_apply,
+        rhs,
         x0=torch.zeros_like(rhs),
-        tol=cg_tol, 
-        max_iter=max_cg_iter, 
-        early_stopping=True
-    ).solve()
+        tol=cg_tol,
+        max_iter=max_cg_iter,
+        early_stopping=True,
+        M_inv_apply=M_inv
+    )
+    us = cg.solve()
     
     gammas = ws[None, :] * us
     shape = (J,) + (M_loc,) * d_loc
@@ -2449,7 +2539,7 @@ def logdet_slq(ws, sigma2, toeplitz,
     logdet = (logdet_acc / probes).item() + n * math.log(sigma2)
     return logdet
 
-def compute_prediction_variance(x_new, xis, ws, A_var, cg_tol, max_cg_iter, variance_method, h, xcen, hutchinson_probes, nufft_eps, device, rdtype, cdtype):
+def compute_prediction_variance(x_new, xis, ws, A_var, cg_tol, max_cg_iter, variance_method, h, xcen, hutchinson_probes, nufft_eps, device, rdtype, cdtype, M_inv=None):
     """
     Compute the prediction variance.
 
@@ -2503,7 +2593,8 @@ def compute_prediction_variance(x_new, xis, ws, A_var, cg_tol, max_cg_iter, vari
             rhs = ws * fx.conj()  # (b, m)
             gamma = ConjugateGradients(
                 A_var, rhs, x0=torch.zeros_like(rhs, dtype=cdtype),
-                tol=cg_tol, max_iter=max_cg_iter, early_stopping=True
+                tol=cg_tol, max_iter=max_cg_iter, early_stopping=True,
+                M_inv_apply=M_inv
             ).solve()  # (b, m)
             s2b = torch.real((fx * (ws * gamma)).sum(dim=-1)).clamp_min(0.0)  # (b,)
             out.append(s2b)
@@ -2517,7 +2608,7 @@ def compute_prediction_variance(x_new, xis, ws, A_var, cg_tol, max_cg_iter, vari
         # Compute diagonal sums
         t1 = time.time()
         est_sums = diag_sums_nd(
-            A_var, J, xis, max_cg_iter, cg_tol, ws
+            A_var, J, xis, max_cg_iter, cg_tol, ws, M_inv=M_inv
         )
         t2 = time.time()
         print(f"Time to compute diag sums: {t2-t1:.4f} seconds")
