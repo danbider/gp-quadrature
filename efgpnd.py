@@ -1368,6 +1368,7 @@ class EFGPND(nn.Module):
         *,
         n_samples: int = 64,
         return_samples: bool = False,
+        field: bool = False,
         seed: Optional[int] = None,
         nufft_eps: Optional[float] = None,
     ):
@@ -1380,6 +1381,17 @@ class EFGPND(nn.Module):
         iteration counts -- far better conditioned at small noise than the
         broadband solve behind ``predict(variance_method='stochastic')``.
         See ``scratch/pathwise_variance.tex``.
+
+        ``field=True`` selects the *diagonal-sums* evaluation: each posterior draw
+        is a real trigonometric polynomial ``f_post(x*) = Re[psi(x*)^* v]`` with
+        coefficients ``v`` on the frequency grid, so ``f_post(x*)^2`` has Fourier
+        coefficients given by the self-correlation of ``q = (1/2)(conj(w*v) +
+        flip(w*v))``. Averaging those coefficients over the draws yields a single
+        coefficient field whose transform gives Var on *all* of ``x_new`` in one
+        NUFFT (instead of one NUFFT per draw). This recovers the original
+        stochastic estimator's "one transform for the whole field" cost structure
+        while keeping the well-conditioned Matheron solve, and is guaranteed
+        nonnegative. ``field=True`` is incompatible with ``return_samples=True``.
 
         Returns ``var`` of shape (B,), or ``(var, samples)`` with samples of
         shape (n_samples, B) when ``return_samples=True``. Outputs are in the
@@ -1424,9 +1436,18 @@ class EFGPND(nn.Module):
             early_stopping=True, M_inv_apply=M_inv,
         ).solve()
 
-        # f_post = f_prior + update on x_new. Both share the D-weight and real
-        # part, so fold them into a single batched NUFFT: f_post = Re[F (D(√2 ζ + β))].
-        samples = nufft_new.type2(ws[None, :] * (SQ2 * zeta + beta), out_shape=OUT).real
+        # Coefficient vector of each posterior draw: f_post(x*) = Re[psi(x*)^* v],
+        # v = √2 ζ + β on the frequency grid (D-weighting folded into psi below).
+        v = SQ2 * zeta + beta                                              # (S, M)
+
+        if field:
+            if return_samples:
+                raise ValueError("field=True is incompatible with return_samples=True")
+            var = _pathwise_var_field(v, ws, xis, h, xcen, x_new, nufft_eps)
+            return var
+
+        # Direct route: one NUFFT per draw, then empirical variance over draws.
+        samples = nufft_new.type2(ws[None, :] * v, out_shape=OUT).real
         var = samples.var(dim=0)
         return (var, samples) if return_samples else var
 
@@ -1749,17 +1770,20 @@ class ToeplitzND:
         # Slice indices for central block extraction
         self.starts = [n-1 for n in self.ns]
         self.ends = [st+n for st, n in zip(self.starts, self.ns)]
-        
-        # Prepare slices for central block extraction
-        self.central_slices = []
-        
+
         # Cache FFT dimensions for repeated use
         self.fft_dims = list(range(-len(self.Ls), 0))
-        
-        # Preallocate buffers for reuse
-        self._cached_batch_shape = None
-        self._cached_x_pad = None
-        self._cached_x_fft = None
+
+        # Precompute the (static) data-dim central-block slices once. The batch
+        # dims are prepended per-call (cheap) since their count varies.
+        self._data_slices = tuple(
+            slice(st, en) for st, en in zip(self.starts, self.ends)
+        )
+
+        # Precompute the per-axis output sizes for the forward FFT. Passing
+        # ``s=`` to fftn lets the FFT zero-pad each axis internally, avoiding a
+        # separate full-size nnf.pad allocation+copy of the input.
+        self.fft_shape = list(self.fft_shape)
         
     def _next_fast_fft_size(self, n):
         """
@@ -1799,7 +1823,9 @@ class ToeplitzND:
         Returns:
             Toeplitz matrix-vector product of shape (batch_size, *output_dimensions) or (*output_dimensions)
         """
-        x = x.to(self.device)
+        # Avoid a no-op host/device round-trip when already colocated.
+        if x.device != self.device:
+            x = x.to(self.device)
         orig_flat = False  # remember how input looked
 
         # --- Determine input layout and batch shape ---
@@ -1819,38 +1845,31 @@ class ToeplitzND:
         if not x.is_complex():
             x = x.to(dtype=self.dtype)
 
-        # --- Create padding values ---
-        pad = []
-        for n, F in zip(reversed(self.ns), reversed(self.fft_shape)):
-            pad += [0, F - n]
+        # --- FFT convolution ---
+        # Fuse the zero-pad into the forward FFT via ``s=``: fftn pads each
+        # transformed axis from ns -> fft_shape internally, which is bit-for-bit
+        # identical to nnf.pad followed by fftn but skips materializing a full
+        # fft_shape-sized padded copy of the input.
+        x_fft = fftn(x, s=self.fft_shape, dim=self.fft_dims)
 
-        # --- Zero-pad input ---
-        x_pad = nnf.pad(x, pad)
-
-        # --- Perform FFT convolution ---
-        x_fft = fftn(x_pad, dim=list(range(-self.d, 0)))
-        
-        # Multiply in frequency domain
+        # Multiply in frequency domain (in place: x_fft is a fresh allocation
+        # from fftn, so this avoids a second full-size temporary).
         if self.fft_kernel is not None:
-            y_fft = x_fft * self.fft_kernel
+            x_fft *= self.fft_kernel
         else:
-            y_fft = x_fft * fftn(self.v_pad, dim=self.fft_dims)
-        
+            x_fft *= fftn(self.v_pad, dim=self.fft_dims)
+
         # Inverse FFT
-        y = ifftn(y_fft, dim=list(range(-self.d, 0)))
-        
-        # --- Extract central block ---
-        # Create slices for the batch dimensions
-        slices = [slice(None)] * (y.ndim - self.d)
-        # Add slices for the data dimensions
-        for st, en in zip(self.starts, self.ends):
-            slices.append(slice(st, en))
-        y = y[tuple(slices)]
-        
+        y = ifftn(x_fft, dim=self.fft_dims)
+
+        # --- Extract central block (batch slices prepended to cached data slices) ---
+        slices = (slice(None),) * (y.ndim - self.d) + self._data_slices
+        y = y[slices]
+
         # --- Restore original layout ---
         if orig_flat:
             y = y.reshape(*batch_shape, self.size)
-            
+
         return y
 
 def compute_convolution_vector_vectorized_dD(m, x: torch.Tensor, h) -> torch.Tensor:
@@ -2456,8 +2475,39 @@ def nufft_var_est_nd(est_sums, h_val, x_center, pts, eps_val):
     cdtype = _cmplx(pts.dtype)
     nufft_op = NUFFT(pts, x_center, h_val, eps=eps_val, cdtype=cdtype)
     
-    # special case: don't use the NUFFT class because we need modeord=True 
+    # special case: don't use the NUFFT class because we need modeord=True
     return pff.finufft_type2(nufft_op.phi, est_sums, eps=eps_val, isign=+1, modeord=True).real
+
+
+def _pathwise_var_field(v, ws, xis, h, xcen, x_new, nufft_eps):
+    """Variance field from pathwise coefficients via the diagonal-sums structure.
+
+    Each posterior draw is a real trig polynomial f_post(x*) = Re[psi(x*)^* v],
+    psi = D phi(x*), so f_post(x*) = sum_a q_a exp(2pi i xi_a . x*) with
+        p = w .* v ,   q_a = (1/2)(conj(p_a) + p_{-a}).
+    Hence f_post(x*)^2 = sum_R d[R] exp(2pi i (h R) . x*) with d = q (*) q the
+    self-correlation of q. Because q_a = conj(q_{-a}) this self-correlation is
+    exactly ifftn(|fftn(q)|^2). Averaging d over draws and transforming with one
+    NUFFT gives Var on all of x_new -- the original estimator's single-transform
+    cost, but driven by the well-conditioned Matheron solve. Nonnegative by
+    construction (it equals mean_s f_post(x*)^2 to NUFFT accuracy).
+
+    v   : (S, M) complex pathwise coefficients
+    ws  : (M,)   spectral weights
+    xis : frequency grid object exposing mtot_per_dim
+    """
+    S, M = v.shape
+    OUT = tuple(int(m) for m in xis.mtot_per_dim)
+    d_loc = len(OUT)
+    p = (ws[None, :] * v).reshape((S,) + OUT)                  # (S, m1, .., md)
+    flip_dims = tuple(range(1, d_loc + 1))
+    # f_post(x) = Re[sum_a p_a e^{+2pi i xi_a.x}] (NUFFT.type2 uses isign=+1), so
+    # the real-poly coefficients are q_a = (1/2)(p_a + conj(p_{-a})).
+    q = 0.5 * (p + torch.flip(p, dims=flip_dims).conj())
+    s_size = tuple(2 * m - 1 for m in OUT)
+    Q = fftn(q, s=s_size, dim=flip_dims)
+    field = ifftn((Q.conj() * Q).real.to(Q.dtype), s=s_size, dim=flip_dims).mean(dim=0)
+    return nufft_var_est_nd(field, h, xcen, x_new, nufft_eps).clamp_min(0.0)
 
 
 # ------------------------------------------------------------
