@@ -50,14 +50,22 @@ def _canonicalize_kernel_name(kernel: str) -> str:
     )
 
 
-def _build_base_kernel(kernel: str):
+def _build_base_kernel(kernel: str, ard_num_dims: Optional[int] = None):
+    """Build the SKI base kernel.
+
+    ``ard_num_dims=d`` gives a separate lengthscale per input dimension (ARD);
+    ``None`` keeps a single shared (isotropic) lengthscale. ARD is fully
+    compatible with the Toeplitz/Kronecker structure of GridInterpolationKernel
+    (each dimension keeps its own 1-D Toeplitz factor).
+    """
+    kwargs = {} if ard_num_dims is None else {"ard_num_dims": int(ard_num_dims)}
     kernel_name = _canonicalize_kernel_name(kernel)
     if kernel_name == "rbf":
-        return gpytorch.kernels.RBFKernel()
+        return gpytorch.kernels.RBFKernel(**kwargs)
     if kernel_name == "matern32":
-        return gpytorch.kernels.MaternKernel(nu=1.5)
+        return gpytorch.kernels.MaternKernel(nu=1.5, **kwargs)
     if kernel_name == "matern52":
-        return gpytorch.kernels.MaternKernel(nu=2.5)
+        return gpytorch.kernels.MaternKernel(nu=2.5, **kwargs)
     raise AssertionError(f"Unhandled kernel name '{kernel_name}'")
 
 
@@ -159,10 +167,11 @@ class _SKIExactGPModel(gpytorch.models.ExactGP):
         kernel: str,
         grid_size: Union[int, Tuple[int, ...]],
         grid_bounds: GridBoundsLike,
+        ard_num_dims: Optional[int] = None,
     ) -> None:
         super().__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ConstantMean()
-        self.base_kernel = _build_base_kernel(kernel)
+        self.base_kernel = _build_base_kernel(kernel, ard_num_dims=ard_num_dims)
         self.covar_module = gpytorch.kernels.ScaleKernel(
             gpytorch.kernels.GridInterpolationKernel(
                 self.base_kernel,
@@ -193,13 +202,15 @@ def fit_ski_gp(
     device: Optional[Union[str, torch.device]] = None,
     max_train_n: Optional[int] = None,
     subsample_seed: int = 0,
-    init_lengthscale: Optional[float] = None,
+    ard_num_dims: Optional[int] = None,
+    init_lengthscale: Optional[Union[float, Sequence[float]]] = None,
     init_outputscale: Optional[float] = None,
     init_noise: Optional[float] = None,
     cg_tolerance: float = 1,
     eval_cg_tolerance: Optional[float] = None,
     max_cg_iterations: int = 1000,
     max_preconditioner_size: int = 15,
+    max_root_decomposition_size: Optional[int] = None,
     max_lanczos_quadrature_iterations: int = 20,
     num_trace_samples: int = 10,
     checkpoint_size: Optional[int] = None,
@@ -254,11 +265,19 @@ def fit_ski_gp(
         kernel=kernel,
         grid_size=resolved_grid_size,
         grid_bounds=resolved_grid_bounds,
+        ard_num_dims=ard_num_dims,
     ).to(device=target_device, dtype=dtype)
 
     with torch.no_grad():
         if init_lengthscale is not None:
-            model.base_kernel.lengthscale = float(init_lengthscale)
+            # Accept a scalar (shared/broadcast) or a per-dim sequence (ARD).
+            if isinstance(init_lengthscale, (int, float)):
+                model.base_kernel.lengthscale = float(init_lengthscale)
+            else:
+                ls_tensor = torch.as_tensor(
+                    list(init_lengthscale), device=target_device, dtype=dtype
+                ).reshape(model.base_kernel.lengthscale.shape)
+                model.base_kernel.lengthscale = ls_tensor
         if init_outputscale is not None:
             model.covar_module.outputscale = float(init_outputscale)
         if init_noise is not None:
@@ -274,6 +293,7 @@ def fit_ski_gp(
         "iteration": [],
         "loss": [],
         "lengthscale": [],
+        "lengthscale_vec": [],
         "outputscale": [],
         "noise": [],
         "forward_sec": [],
@@ -283,9 +303,13 @@ def fit_ski_gp(
     }
 
     # Log initial hyperparameters at iter 0
+    def _ls_vec() -> list:
+        return [float(v) for v in model.base_kernel.lengthscale.detach().reshape(-1).tolist()]
+
     history["iteration"].append(0)
     history["loss"].append(float("nan"))
     history["lengthscale"].append(float(model.base_kernel.lengthscale.detach().reshape(-1).mean().item()))
+    history["lengthscale_vec"].append(_ls_vec())
     history["outputscale"].append(float(model.covar_module.outputscale.detach().item()))
     history["noise"].append(float(likelihood.noise.detach().item()))
     history["forward_sec"].append(0.0)
@@ -306,6 +330,12 @@ def fit_ski_gp(
         gpytorch.settings.max_cg_iterations(max_cg_iterations),
         gpytorch.settings.max_preconditioner_size(max_preconditioner_size),
         gpytorch.settings.max_lanczos_quadrature_iterations(max_lanczos_quadrature_iterations),
+        # Rank of the stochastic Lanczos root decomposition used for the
+        # log-det/solve. Default (None) keeps GPyTorch's 100, which means ~100
+        # MVMs per MLL step -- prohibitive at N>1e7. Smaller is the standard
+        # large-data learning profile.
+        *([gpytorch.settings.max_root_decomposition_size(max_root_decomposition_size)]
+          if max_root_decomposition_size is not None else []),
         gpytorch.settings.num_trace_samples(num_trace_samples),
         gpytorch.settings.memory_efficient(memory_efficient),
         gpytorch.settings.use_toeplitz(use_toeplitz),
@@ -346,6 +376,7 @@ def fit_ski_gp(
             history["iteration"].append(iteration + 1)
             history["loss"].append(loss_value)
             history["lengthscale"].append(lengthscale_value)
+            history["lengthscale_vec"].append(_ls_vec())
             history["outputscale"].append(outputscale_value)
             history["noise"].append(noise_value)
             history["forward_sec"].append(forward_sec)
@@ -397,12 +428,14 @@ def fit_ski_gp(
         "fit_time_sec": time.time() - start_time,
         "settings": {
             "kernel": _canonicalize_kernel_name(kernel),
+            "ard_num_dims": ard_num_dims,
             "lr": lr,
             "noise_floor": noise_floor,
             "cg_tolerance": cg_tolerance,
             "eval_cg_tolerance": eval_cg_tolerance or cg_tolerance,
             "max_cg_iterations": max_cg_iterations,
             "max_preconditioner_size": max_preconditioner_size,
+            "max_root_decomposition_size": max_root_decomposition_size,
             "max_lanczos_quadrature_iterations": max_lanczos_quadrature_iterations,
             "num_trace_samples": num_trace_samples,
             "checkpoint_size": checkpoint_size,
