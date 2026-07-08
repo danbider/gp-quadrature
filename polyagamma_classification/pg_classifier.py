@@ -66,6 +66,30 @@ class _VariationalState:
 
 
 @dataclass
+class _GridState:
+    """Grid-tied state: depends only on (X, h, mtot), not on kernel hypers or omega.
+
+    This is the analog of efgpnd's frozen cache (efgpnd.py:209-249). The NUFFT phase
+    array, the unweighted convolution vector / Toeplitz, and the type-1/type-2 spread
+    closures are all functions of the data points and the quadrature grid geometry only,
+    so they can be built once and reused across many hyperparameter iterations, refreshing
+    only the cheap O(M) frequency-space diagonals (ws, ws2, Dprime) each iter.
+    """
+
+    xis: torch.Tensor
+    h: float
+    mtot: int
+    toeplitz: ToeplitzND
+    nufft_op: NUFFT
+    fadj: Callable[[torch.Tensor], torch.Tensor]
+    fwd: Callable[[torch.Tensor], torch.Tensor]
+    fadj_batched: Callable[[torch.Tensor], torch.Tensor]
+    fwd_batched: Callable[[torch.Tensor], torch.Tensor]
+    out_shape: tuple[int, ...]
+    key: tuple
+
+
+@dataclass
 class _SpectralState:
     xis: torch.Tensor
     h: float
@@ -326,7 +350,7 @@ def _make_kernel(
         )
 
 
-def _build_spectral_state(
+def _build_grid_state(
     X: torch.Tensor,
     kernel: Kernel,
     *,
@@ -336,7 +360,15 @@ def _build_spectral_state(
     rdtype: torch.dtype,
     cdtype: torch.dtype,
     device: torch.device,
-) -> _SpectralState:
+) -> _GridState:
+    """Build the grid-tied (hyper-free) part of the spectral state.
+
+    Everything here is an O(n) / O(n log n) function of the data points and the grid
+    geometry only: the NUFFT phase array, the unweighted convolution vector v_kernel and
+    its Toeplitz, and the spread closures. The quadrature grid size itself (via get_xis)
+    depends on the current lengthscale, so this is rebuilt on a schedule (see fit); between
+    rebuilds the whole object is reused. The cache key mirrors efgpnd.py:212-217.
+    """
     x0 = X.min(dim=0).values
     x1 = X.max(dim=0).values
     L = (x1 - x0).max()
@@ -353,14 +385,9 @@ def _build_spectral_state(
     grids = torch.meshgrid(*(xis_1d for _ in range(d)), indexing="ij")
     xis = torch.stack(grids, dim=-1).view(-1, d)
 
-    spec_density = kernel.spectral_density(xis).to(dtype=rdtype)
-    ws2 = (spec_density * h**d).to(device=device, dtype=cdtype)
-    ws = torch.sqrt(ws2)
-
     m_conv = (mtot - 1) // 2
     v_kernel = compute_convolution_vector_vectorized_dD(m_conv, X, h).to(dtype=cdtype)
     toeplitz = ToeplitzND(v_kernel, force_pow2=False)
-    Dprime = (h**d * kernel.spectral_grad(xis)).to(device=device, dtype=cdtype)
 
     out_shape = (mtot,) * d
     nufft_op = NUFFT(
@@ -376,13 +403,12 @@ def _build_spectral_state(
     fadj_batched = vmap(fadj, in_dims=0, out_dims=0)
     fwd_batched = vmap(fwd, in_dims=0, out_dims=0)
 
-    return _SpectralState(
+    key = (int(id(X)), int(mtot), round(float(h), 12))
+
+    return _GridState(
         xis=xis.to(device=device, dtype=rdtype),
         h=h,
         mtot=mtot,
-        ws=ws,
-        ws2=ws2,
-        Dprime=Dprime,
         toeplitz=toeplitz,
         nufft_op=nufft_op,
         fadj=fadj,
@@ -390,7 +416,76 @@ def _build_spectral_state(
         fadj_batched=fadj_batched,
         fwd_batched=fwd_batched,
         out_shape=out_shape,
+        key=key,
     )
+
+
+def _refresh_hyper_state(
+    grid: _GridState,
+    kernel: Kernel,
+    *,
+    rdtype: torch.dtype,
+    cdtype: torch.dtype,
+    device: torch.device,
+) -> _SpectralState:
+    """Recompute only the O(M) hyper-tied diagonals (ws, ws2, Dprime) on a frozen grid.
+
+    ws and Dprime depend on the kernel spectral density evaluated at the (possibly frozen)
+    quadrature nodes grid.xis, so they must be rebuilt whenever the hypers change -- but
+    this is cheap M-space work, no NUFFT spreads. The returned _SpectralState reuses the
+    grid-tied fields verbatim so all downstream callers are unchanged.
+    """
+    d = grid.xis.shape[1]
+    spec_density = kernel.spectral_density(grid.xis).to(dtype=rdtype)
+    ws2 = (spec_density * grid.h**d).to(device=device, dtype=cdtype)
+    ws = torch.sqrt(ws2)
+    Dprime = (grid.h**d * kernel.spectral_grad(grid.xis)).to(device=device, dtype=cdtype)
+
+    return _SpectralState(
+        xis=grid.xis,
+        h=grid.h,
+        mtot=grid.mtot,
+        ws=ws,
+        ws2=ws2,
+        Dprime=Dprime,
+        toeplitz=grid.toeplitz,
+        nufft_op=grid.nufft_op,
+        fadj=grid.fadj,
+        fwd=grid.fwd,
+        fadj_batched=grid.fadj_batched,
+        fwd_batched=grid.fwd_batched,
+        out_shape=grid.out_shape,
+    )
+
+
+def _build_spectral_state(
+    X: torch.Tensor,
+    kernel: Kernel,
+    *,
+    spectral_eps: float,
+    trunc_eps: float,
+    nufft_eps: float,
+    rdtype: torch.dtype,
+    cdtype: torch.dtype,
+    device: torch.device,
+) -> _SpectralState:
+    """Build the full spectral state from scratch (grid-tied + hyper-tied).
+
+    Thin wrapper preserving the original behavior/signature for callers that always want a
+    fresh state (e.g. the final post-optimization fit). The training loop instead caches the
+    grid via _build_grid_state and refreshes hypers via _refresh_hyper_state.
+    """
+    grid = _build_grid_state(
+        X,
+        kernel,
+        spectral_eps=spectral_eps,
+        trunc_eps=trunc_eps,
+        nufft_eps=nufft_eps,
+        rdtype=rdtype,
+        cdtype=cdtype,
+        device=device,
+    )
+    return _refresh_hyper_state(grid, kernel, rdtype=rdtype, cdtype=cdtype, device=device)
 
 
 def _build_weighted_toeplitz(
@@ -466,14 +561,20 @@ def _make_sigma_apply(
         weighted_toeplitz_op = _build_weighted_toeplitz(delta_complex, spectral)
     M_inv = _build_cg_preconditioner(delta, spectral, preconditioner_type)
 
-    def sigma_apply(z: torch.Tensor) -> torch.Tensor:
+    def sigma_apply(z: torch.Tensor, *, fadj_z: torch.Tensor | None = None) -> torch.Tensor:
         vector_input = z.dim() == 1
         if vector_input:
             z = z.unsqueeze(0)
         z = z.to(dtype=spectral.ws.dtype)
 
         Delta = delta_complex.view(1, -1)
-        rhs = spectral.ws * spectral.fadj_batched(z)
+        # fadj_z = F^H z is omega- and hyper-independent (depends only on the grid and z),
+        # so callers with frozen grid+probes pass it in precomputed to skip the type-1 spread.
+        if fadj_z is None:
+            fadj_z = spectral.fadj_batched(z)
+        elif fadj_z.dim() == 1:
+            fadj_z = fadj_z.unsqueeze(0)
+        rhs = spectral.ws * fadj_z
 
         def A_feat(u: torch.Tensor) -> torch.Tensor:
             if weighted_toeplitz_op is not None:
@@ -593,6 +694,8 @@ def _run_estep(
     reuse_probes: bool,
     use_exact_weighted_toeplitz_operator: bool = False,
     preconditioner_type: str | None = None,
+    frozen_probes: torch.Tensor | None = None,
+    probe_spread: torch.Tensor | None = None,
     seed: int | None,
     verbose: int,
 ) -> tuple[_VariationalState, dict[str, float]]:
@@ -603,13 +706,26 @@ def _run_estep(
         use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
         preconditioner_type=preconditioner_type,
     )
-    probes = variational.probes
+    # frozen_probes fixes the Hutchinson probes across outer iters (analog of efgpnd's
+    # trace_probes_freeze); probe_spread is the precomputed omega-independent F^H probes so
+    # the type-1 spread is amortized across all iterations that reuse the frozen grid.
+    probes = frozen_probes if frozen_probes is not None else variational.probes
+    fadj_z = None
+    if frozen_probes is not None and (n_probes == 0 or probe_spread is not None):
+        F_kappa = spectral.fadj_batched(
+            kappa.to(dtype=spectral.ws.dtype).unsqueeze(0)
+        )
+        fadj_z = F_kappa if n_probes == 0 else torch.cat([F_kappa, probe_spread], dim=0)
     fit_metric = float("nan")
     residual = float("inf")
 
     with torch.no_grad():
         for it in range(max_iters):
-            if n_probes > 0 and (probes is None or probes.shape[0] != n_probes or not reuse_probes or it == 0):
+            if (
+                frozen_probes is None
+                and n_probes > 0
+                and (probes is None or probes.shape[0] != n_probes or not reuse_probes or it == 0)
+            ):
                 probe_seed = None if seed is None else seed + 17 * (it + 1)
                 probes = _sample_rademacher(
                     (n_probes, targets.numel()),
@@ -623,7 +739,7 @@ def _run_estep(
             else:
                 Z = kappa[None, :]
 
-            S_all = sigma_apply(Z)
+            S_all = sigma_apply(Z, fadj_z=fadj_z)
             mean = S_all[0]
             Sz = S_all[1:] if n_probes > 0 else torch.empty((0, targets.numel()), device=targets.device, dtype=targets.dtype)
             sigma_diag = (probes * Sz).mean(dim=0) if n_probes > 0 else torch.zeros_like(mean)
@@ -665,6 +781,8 @@ def _compute_mstep_gradient(
     cg_tol: float,
     use_exact_weighted_toeplitz_operator: bool = False,
     preconditioner_type: str | None = None,
+    frozen_probes: torch.Tensor | None = None,
+    q_block: torch.Tensor | None = None,
     seed: int | None,
 ) -> dict[str, torch.Tensor]:
     solve_A_beta, apply_omega, solve_info = _make_feature_space_solver(
@@ -675,13 +793,19 @@ def _compute_mstep_gradient(
         preconditioner_type=preconditioner_type,
     )
 
-    probes = _sample_rademacher(
-        (n_probes, kappa.numel()),
-        device=kappa.device,
-        dtype=kappa.dtype,
-        seed=None if seed is None else seed + 10_000,
-    ).to(dtype=spectral.ws.dtype)
-    Q_block = spectral.fadj_batched(probes)
+    if frozen_probes is not None:
+        probes = frozen_probes.to(dtype=spectral.ws.dtype)
+    else:
+        probes = _sample_rademacher(
+            (n_probes, kappa.numel()),
+            device=kappa.device,
+            dtype=kappa.dtype,
+            seed=None if seed is None else seed + 10_000,
+        ).to(dtype=spectral.ws.dtype)
+    # Q_block = F^H probes is omega-independent -> reuse the precomputed spread when the
+    # grid+probes are frozen. q_y = F^H kappa is cheap (one spread) and kappa can change
+    # (NB dispersion), so it is always recomputed.
+    Q_block = q_block if q_block is not None else spectral.fadj_batched(probes)
     q_y = spectral.fadj_batched(kappa.to(dtype=spectral.ws.dtype).unsqueeze(0))
 
     Q_all = torch.cat([Q_block, q_y], dim=0)
@@ -1164,6 +1288,10 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
         use_exact_weighted_toeplitz_operator: bool = True,
         cg_preconditioner: str | None = None,
         reuse_e_probes: bool = True,
+        refresh_grid_every: int | None = None,
+        freeze_grid: bool = False,
+        freeze_e_probes: bool = True,
+        freeze_m_probes: bool = True,
         prediction_batch_size: int | None = 64,
         predictive_variance_method: str = "exact",
         predictive_variance_probes: int = 16,
@@ -1196,6 +1324,10 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
         self.use_exact_weighted_toeplitz_operator = use_exact_weighted_toeplitz_operator
         self.cg_preconditioner = cg_preconditioner
         self.reuse_e_probes = reuse_e_probes
+        self.refresh_grid_every = refresh_grid_every
+        self.freeze_grid = freeze_grid
+        self.freeze_e_probes = freeze_e_probes
+        self.freeze_m_probes = freeze_m_probes
         self.prediction_batch_size = prediction_batch_size
         self.predictive_variance_method = predictive_variance_method
         self.predictive_variance_probes = predictive_variance_probes
@@ -1367,16 +1499,73 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
         history: list[dict[str, float]] = []
         fit_started = time.perf_counter()
 
+        # Frozen Hutchinson probes (sampled once, reused across outer iters) -- analog of
+        # efgpnd's trace_probes_freeze. Keeping them fixed lets their omega-independent
+        # spreads F^H probes be cached alongside the grid, and stabilizes the gradient noise.
+        n_train = X_t.shape[0]
+        e_probes = None
+        if self.freeze_e_probes and self.n_e_probes > 0:
+            e_probes = _sample_rademacher(
+                (self.n_e_probes, n_train),
+                device=self._device_,
+                dtype=self._rdtype_,
+                seed=None if self.random_state is None else self.random_state + 424_242,
+            )
+        m_probes = None
+        if self.freeze_m_probes and self.n_m_probes > 0:
+            m_probes = _sample_rademacher(
+                (self.n_m_probes, n_train),
+                device=self._device_,
+                dtype=self._rdtype_,
+                seed=None if self.random_state is None else self.random_state + 848_484,
+            )
+
+        # Grid-tied state cache (efgpnd's frozen-grid amortization). The grid is rebuilt from
+        # the current hypers on a schedule; between rebuilds the O(n) NUFFT/Toeplitz/spreads
+        # are reused and only the O(M) hyper diagonals are refreshed each iter.
+        grid_state = None
+        grid_iter = 0
+        e_probe_spread = None
+        m_probe_spread = None
+        K_refresh = None if self.refresh_grid_every is None else int(self.refresh_grid_every)
+
         for outer in range(self.max_iter):
             likelihood = self._make_likelihood()
             kappa_t = likelihood.kappa(y_t)
             pg_b_t = likelihood.pg_b(y_t)
-            spectral = _build_spectral_state(
-                X_t,
+
+            if self.freeze_grid:
+                rebuild_grid = grid_state is None
+            elif K_refresh is not None and K_refresh > 0:
+                rebuild_grid = grid_state is None or (grid_iter % K_refresh == 0)
+            else:
+                rebuild_grid = True
+            if rebuild_grid:
+                grid_state = _build_grid_state(
+                    X_t,
+                    self.kernel_,
+                    spectral_eps=self.spectral_eps,
+                    trunc_eps=self.trunc_eps,
+                    nufft_eps=self.nufft_eps,
+                    rdtype=self._rdtype_,
+                    cdtype=self._cdtype_,
+                    device=self._device_,
+                )
+                # omega-independent probe spreads follow the grid: recompute on rebuild.
+                e_probe_spread = (
+                    grid_state.fadj_batched(e_probes.to(dtype=self._cdtype_))
+                    if e_probes is not None
+                    else None
+                )
+                m_probe_spread = (
+                    grid_state.fadj_batched(m_probes.to(dtype=self._cdtype_))
+                    if m_probes is not None
+                    else None
+                )
+            grid_iter += 1
+            spectral = _refresh_hyper_state(
+                grid_state,
                 self.kernel_,
-                spectral_eps=self.spectral_eps,
-                trunc_eps=self.trunc_eps,
-                nufft_eps=self.nufft_eps,
                 rdtype=self._rdtype_,
                 cdtype=self._cdtype_,
                 device=self._device_,
@@ -1397,6 +1586,8 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
                 reuse_probes=self.reuse_e_probes,
                 use_exact_weighted_toeplitz_operator=self.use_exact_weighted_toeplitz_operator,
                 preconditioner_type=self.cg_preconditioner,
+                frozen_probes=e_probes,
+                probe_spread=e_probe_spread,
                 seed=None if self.random_state is None else self.random_state + 1000 * outer,
                 verbose=self.verbose,
             )
@@ -1408,6 +1599,8 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
                 cg_tol=self.cg_tol,
                 use_exact_weighted_toeplitz_operator=self.use_exact_weighted_toeplitz_operator,
                 preconditioner_type=self.cg_preconditioner,
+                frozen_probes=m_probes,
+                q_block=m_probe_spread,
                 seed=None if self.random_state is None else self.random_state + 1000 * outer,
             )
             grad = mstep_out["grad"].real
@@ -1638,6 +1831,10 @@ class PolyagammaGPNegativeBinomialRegressor(_BasePolyagammaGPEstimator, Regresso
         use_exact_weighted_toeplitz_operator: bool = True,
         cg_preconditioner: str | None = None,
         reuse_e_probes: bool = True,
+        refresh_grid_every: int | None = None,
+        freeze_grid: bool = False,
+        freeze_e_probes: bool = True,
+        freeze_m_probes: bool = True,
         prediction_batch_size: int | None = 64,
         predictive_variance_method: str = "exact",
         predictive_variance_probes: int = 16,
@@ -1671,6 +1868,10 @@ class PolyagammaGPNegativeBinomialRegressor(_BasePolyagammaGPEstimator, Regresso
             use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
             cg_preconditioner=cg_preconditioner,
             reuse_e_probes=reuse_e_probes,
+            refresh_grid_every=refresh_grid_every,
+            freeze_grid=freeze_grid,
+            freeze_e_probes=freeze_e_probes,
+            freeze_m_probes=freeze_m_probes,
             prediction_batch_size=prediction_batch_size,
             predictive_variance_method=predictive_variance_method,
             predictive_variance_probes=predictive_variance_probes,
