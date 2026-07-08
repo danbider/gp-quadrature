@@ -74,7 +74,7 @@ def recovery_metrics(f_hat: np.ndarray, f_true: np.ndarray) -> dict:
 
 
 # --------------------------------------------------------------------------- fits
-def fit_efgp(x, y, f_true):
+def fit_efgp(x, y, f_true, preconditioner=None, name=None):
     x_np = x.detach().cpu().numpy().astype(np.float64)
     y_np = y.detach().cpu().numpy().astype(np.int64)
     reg = PolyagammaGPNegativeBinomialRegressor(
@@ -101,6 +101,7 @@ def fit_efgp(x, y, f_true):
         predictive_variance_method="chebyshev",
         predictive_variance_chebyshev_nodes=7,
         use_exact_weighted_toeplitz_operator=True,
+        cg_preconditioner=preconditioner,   # None | "jacobi" | "kronecker"
         random_state=0,
         device="cpu",
         store_history=True,
@@ -111,14 +112,19 @@ def fit_efgp(x, y, f_true):
     dt = time.time() - t0
     f_hat = np.asarray(reg.decision_function(x_np)).reshape(-1)
     resp = np.asarray(reg.predict_response_mean(x_np)).reshape(-1)
+    # Total CG iterations across the fit (E-step Sigma solves + M-step gradient solves).
+    e_cg = sum(float(r.get("e_cg_iters", 0.0)) for r in reg.history_)
+    m_cg = sum(float(r.get("m_cg_iters", 0.0)) for r in reg.history_)
     return {
-        "name": "EFGP-PG",
+        "name": name or f"EFGP-PG[{preconditioner or 'none'}]",
         "time": dt,
         "r": float(reg.total_count_),
         "lengthscale": float(np.ravel(reg.lengthscale_)[0]) if hasattr(reg, "lengthscale_") else float("nan"),
         "outputscale": float(reg.variance_) if hasattr(reg, "variance_") else float("nan"),
         "recovery": recovery_metrics(f_hat, f_true.numpy()),
         "count_mae": float(np.mean(np.abs(resp - y.numpy()))),
+        "e_cg": e_cg,
+        "m_cg": m_cg,
     }
 
 
@@ -203,6 +209,33 @@ def print_result(res):
     )
 
 
+def run_precond_comparison(n):
+    """Fit EFGP with each preconditioner; report wall-clock AND total CG iters."""
+    print(f"\n=== EFGP CG-preconditioner comparison  N={n} ===")
+    x, y, f_true = make_data(n)
+    rows = [fit_efgp(x, y, f_true, preconditioner=pc) for pc in (None, "jacobi", "kronecker")]
+    base = rows[0]
+    print(f"  {'precond':<22s}  {'time(s)':>8s}  {'E-CG':>8s}  {'M-CG':>8s}  "
+          f"{'tot-CG':>8s}  {'CG x':>6s}  {'corr':>7s}  {'r':>6s}")
+    for r in rows:
+        tot = r["e_cg"] + r["m_cg"]
+        base_tot = base["e_cg"] + base["m_cg"]
+        speed = base_tot / tot if tot > 0 else float("nan")
+        print(f"  {r['name']:<22s}  {r['time']:8.2f}  {r['e_cg']:8.0f}  {r['m_cg']:8.0f}  "
+              f"{tot:8.0f}  {speed:5.2f}x  {r['recovery']['corr']:7.4f}  {r['r']:6.3f}")
+    # A valid preconditioner must not change the solution (only convergence speed).
+    corr_consistent = all(abs(r["recovery"]["corr"] - base["recovery"]["corr"]) < 1e-3 for r in rows)
+    tot = {r["name"]: r["e_cg"] + r["m_cg"] for r in rows}
+    base_tot = tot[base["name"]]
+    factors = {r["name"]: base_tot / (tot[r["name"]] or 1) for r in rows if "none" not in r["name"]}
+    winners = [k for k, v in factors.items() if v > 1.0]
+    print(f"  recovery unchanged across preconditioners: {corr_consistent}")
+    print(f"  CG-iter reduction factors: "
+          + ", ".join(f"{k.split('[')[-1].rstrip(']')}={v:.2f}x" for k, v in factors.items()))
+    print(f"  preconditioners that reduce iters: {[w.split('[')[-1].rstrip(']') for w in winners] or 'none'}")
+    return rows
+
+
 def run_one(n, num_inducing=200, max_iters=100, batch_size=None):
     print(f"\n=== N={n} (r_true={R_TRUE}, ls_true={LENGTHSCALE_TRUE}, var_true={VARIANCE_TRUE}) ===")
     x, y, f_true = make_data(n)
@@ -219,8 +252,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=5000)
     ap.add_argument("--sweep", action="store_true")
+    ap.add_argument("--precond", action="store_true",
+                    help="compare EFGP CG preconditioners (none/jacobi/kronecker)")
     ap.add_argument("--no-bench", action="store_true")
     args = ap.parse_args()
+
+    if args.precond:
+        for n in ((args.n,) if not args.sweep else (2000, 8000, 30000)):
+            run_precond_comparison(n)
+        return 0
 
     if not args.no_bench:
         print("=== likelihood efficiency-parity micro-benchmark (ours vs built-in NB) ===")

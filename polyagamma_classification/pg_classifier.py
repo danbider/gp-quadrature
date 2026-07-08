@@ -23,7 +23,13 @@ if str(_ROOT) not in sys.path:
     sys.path.append(str(_ROOT))
 
 from cg import ConjugateGradients
-from efgpnd import NUFFT, ToeplitzND, compute_convolution_vector_vectorized_dD
+from efgpnd import (
+    NUFFT,
+    ToeplitzND,
+    compute_convolution_vector_vectorized_dD,
+    create_jacobi_precond,
+    create_kronecker_precond,
+)
 from kernels import Kernel, Matern, SquaredExponential
 from utils.kernels import get_xis
 
@@ -397,6 +403,53 @@ def _build_weighted_toeplitz(
     return ToeplitzND(v_weighted.to(dtype=spectral.ws.dtype), force_pow2=False)
 
 
+def _build_cg_preconditioner(
+    delta: torch.Tensor,
+    spectral: _SpectralState,
+    preconditioner_type: str | None,
+) -> Callable[[torch.Tensor], torch.Tensor] | None:
+    """Build an M^{-1} preconditioner for the feature-space system A = I + Ds C_w Ds.
+
+    Reuses efgpnd's preconditioners, which target A_mean = D C D + sigma^2 I. The PG
+    feature-space operator is structurally identical: the prior "+I" plays the role of
+    sigma^2 = 1, D = diag(ws) is the spectral-density sqrt, and the Toeplitz is the
+    omega-weighted convolution C_w = F^H diag(delta) F (built here from the weighted
+    convolution vector). Returns None when preconditioning is disabled.
+
+    - "jacobi": exact diagonal, diag(A)_j = 1 + |ws_j|^2 * (sum_i delta_i).
+    - "kronecker": exact for separable spectral density (SE/ARD) + tensor-grid Toeplitz;
+      degrades gracefully off-grid. Setup = d small Hermitian eigendecompositions.
+    """
+    if preconditioner_type in (None, "none"):
+        return None
+    ptype = str(preconditioner_type).lower()
+    d = spectral.xis.shape[1]
+    delta_c = delta.to(dtype=spectral.ws.dtype, device=spectral.ws.device).flatten()
+    conv_shape = tuple(2 * n - 1 for n in spectral.out_shape)
+    v_weighted = spectral.nufft_op.type1(delta_c, out_shape=conv_shape).to(
+        dtype=spectral.ws.dtype
+    )
+    if ptype == "jacobi":
+        center = tuple((L - 1) // 2 for L in v_weighted.shape)
+        diag_scale = float(v_weighted[center].real)
+        return create_jacobi_precond(spectral.ws, sigmasq_scalar=1.0, diag_scale=diag_scale)
+    if ptype == "kronecker":
+        return create_kronecker_precond(
+            spectral.ws,
+            v_weighted,
+            sigmasq_scalar=1.0,
+            d=d,
+            mtot_1d=spectral.mtot,
+            device=spectral.ws.device,
+            cdtype=spectral.ws.dtype,
+            rdtype=spectral.ws.real.dtype,
+        )
+    raise ValueError(
+        f"unknown cg_preconditioner={preconditioner_type!r}; "
+        "expected None, 'jacobi', or 'kronecker'"
+    )
+
+
 def _make_sigma_apply(
     spectral: _SpectralState,
     delta: torch.Tensor,
@@ -404,12 +457,14 @@ def _make_sigma_apply(
     cg_tol: float,
     use_exact_weighted_toeplitz_operator: bool = False,
     weighted_toeplitz: ToeplitzND | None = None,
+    preconditioner_type: str | None = None,
 ) -> tuple[Callable[[torch.Tensor], torch.Tensor], dict[str, int]]:
     info = {"cg_iters": 0}
     delta_complex = delta.to(dtype=spectral.ws.dtype, device=delta.device)
     weighted_toeplitz_op = weighted_toeplitz
     if use_exact_weighted_toeplitz_operator and weighted_toeplitz_op is None:
         weighted_toeplitz_op = _build_weighted_toeplitz(delta_complex, spectral)
+    M_inv = _build_cg_preconditioner(delta, spectral, preconditioner_type)
 
     def sigma_apply(z: torch.Tensor) -> torch.Tensor:
         vector_input = z.dim() == 1
@@ -437,6 +492,7 @@ def _make_sigma_apply(
             tol=cg_tol,
             max_iter=2000,
             early_stopping=True,
+            M_inv_apply=M_inv,
         )
         x = cg.solve()
         info["cg_iters"] = cg.iters_completed
@@ -456,12 +512,14 @@ def _make_feature_space_solver(
     cg_tol: float,
     use_exact_weighted_toeplitz_operator: bool = False,
     weighted_toeplitz: ToeplitzND | None = None,
+    preconditioner_type: str | None = None,
 ) -> tuple[
     Callable[[torch.Tensor], tuple[torch.Tensor, int]],
     Callable[[torch.Tensor], torch.Tensor],
     dict[str, int],
 ]:
     omega = delta.to(dtype=spectral.ws.dtype, device=delta.device).flatten()
+    M_inv = _build_cg_preconditioner(delta, spectral, preconditioner_type)
     D2_real = spectral.ws2.real
     eps_d = max(float(D2_real.mean()) * 1e-14, 1e-14)
     Ds = torch.sqrt(torch.clamp(D2_real, min=eps_d)).to(dtype=spectral.ws.dtype)
@@ -508,6 +566,7 @@ def _make_feature_space_solver(
             tol=cg_tol,
             max_iter=2000,
             early_stopping=True,
+            M_inv_apply=M_inv,
         )
         y = cg.solve()
         info["cg_iters"] = int(cg.iters_completed)
@@ -533,6 +592,7 @@ def _run_estep(
     cg_tol: float,
     reuse_probes: bool,
     use_exact_weighted_toeplitz_operator: bool = False,
+    preconditioner_type: str | None = None,
     seed: int | None,
     verbose: int,
 ) -> tuple[_VariationalState, dict[str, float]]:
@@ -541,6 +601,7 @@ def _run_estep(
         variational.delta,
         cg_tol=cg_tol,
         use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
+        preconditioner_type=preconditioner_type,
     )
     probes = variational.probes
     fit_metric = float("nan")
@@ -603,6 +664,7 @@ def _compute_mstep_gradient(
     n_probes: int,
     cg_tol: float,
     use_exact_weighted_toeplitz_operator: bool = False,
+    preconditioner_type: str | None = None,
     seed: int | None,
 ) -> dict[str, torch.Tensor]:
     solve_A_beta, apply_omega, solve_info = _make_feature_space_solver(
@@ -610,6 +672,7 @@ def _compute_mstep_gradient(
         spectral,
         cg_tol=cg_tol,
         use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
+        preconditioner_type=preconditioner_type,
     )
 
     probes = _sample_rademacher(
@@ -651,12 +714,14 @@ def _solve_beta_mean(
     *,
     cg_tol: float,
     use_exact_weighted_toeplitz_operator: bool = False,
+    preconditioner_type: str | None = None,
 ) -> tuple[torch.Tensor, int]:
     solve_A_beta, _, solve_info = _make_feature_space_solver(
         delta,
         spectral,
         cg_tol=cg_tol,
         use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
+        preconditioner_type=preconditioner_type,
     )
     q_y = spectral.fadj(kappa.to(dtype=spectral.ws.dtype))
     beta, cg_iters = solve_A_beta(q_y)
@@ -1097,6 +1162,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
         trunc_eps: float = 1e-4,
         jitter: float = 1e-8,
         use_exact_weighted_toeplitz_operator: bool = True,
+        cg_preconditioner: str | None = None,
         reuse_e_probes: bool = True,
         prediction_batch_size: int | None = 64,
         predictive_variance_method: str = "exact",
@@ -1128,6 +1194,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
         self.trunc_eps = trunc_eps
         self.jitter = jitter
         self.use_exact_weighted_toeplitz_operator = use_exact_weighted_toeplitz_operator
+        self.cg_preconditioner = cg_preconditioner
         self.reuse_e_probes = reuse_e_probes
         self.prediction_batch_size = prediction_batch_size
         self.predictive_variance_method = predictive_variance_method
@@ -1329,6 +1396,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
                 cg_tol=self.cg_tol,
                 reuse_probes=self.reuse_e_probes,
                 use_exact_weighted_toeplitz_operator=self.use_exact_weighted_toeplitz_operator,
+                preconditioner_type=self.cg_preconditioner,
                 seed=None if self.random_state is None else self.random_state + 1000 * outer,
                 verbose=self.verbose,
             )
@@ -1339,6 +1407,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
                 n_probes=self.n_m_probes,
                 cg_tol=self.cg_tol,
                 use_exact_weighted_toeplitz_operator=self.use_exact_weighted_toeplitz_operator,
+                preconditioner_type=self.cg_preconditioner,
                 seed=None if self.random_state is None else self.random_state + 1000 * outer,
             )
             grad = mstep_out["grad"].real
@@ -1407,6 +1476,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
             cg_tol=self.cg_tol,
             reuse_probes=self.reuse_e_probes,
             use_exact_weighted_toeplitz_operator=self.use_exact_weighted_toeplitz_operator,
+            preconditioner_type=self.cg_preconditioner,
             seed=None if self.random_state is None else self.random_state + 999_999,
             verbose=self.verbose,
         )
@@ -1416,6 +1486,7 @@ class _BasePolyagammaGPEstimator(BaseEstimator):
             self._spectral_state_,
             cg_tol=self.cg_tol,
             use_exact_weighted_toeplitz_operator=self.use_exact_weighted_toeplitz_operator,
+            preconditioner_type=self.cg_preconditioner,
         )
         self._beta_mean_ = beta_mean
         self._likelihood_ = likelihood
@@ -1565,6 +1636,7 @@ class PolyagammaGPNegativeBinomialRegressor(_BasePolyagammaGPEstimator, Regresso
         trunc_eps: float = 1e-4,
         jitter: float = 1e-8,
         use_exact_weighted_toeplitz_operator: bool = True,
+        cg_preconditioner: str | None = None,
         reuse_e_probes: bool = True,
         prediction_batch_size: int | None = 64,
         predictive_variance_method: str = "exact",
@@ -1597,6 +1669,7 @@ class PolyagammaGPNegativeBinomialRegressor(_BasePolyagammaGPEstimator, Regresso
             trunc_eps=trunc_eps,
             jitter=jitter,
             use_exact_weighted_toeplitz_operator=use_exact_weighted_toeplitz_operator,
+            cg_preconditioner=cg_preconditioner,
             reuse_e_probes=reuse_e_probes,
             prediction_batch_size=prediction_batch_size,
             predictive_variance_method=predictive_variance_method,
