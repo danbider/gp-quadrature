@@ -11,7 +11,7 @@ What each fit reports (status "ok"):
   {method, T, eval:"test", n_test, threads,
    time (= median t_total over reps), t_learn, t_predict, t_total,
    sec_all, sec_median, sec_spread, n_reps,
-   nrmse (latent recovery at held-out TEST points), ls, var, noise,
+   rmse (latent-recovery RMSE at held-out TEST points), ls, var, noise,
    peak_rss_gb, status:"ok"}
 On any exception writes status:"error" with the message. (OOM / timeout are
 detected by the driver via kill, not here.)
@@ -119,10 +119,11 @@ def gen_test_points(n_test=NEVAL):
     return xe, fe
 
 
-def nrmse(fhat, f):
-    a = np.asarray(fhat, dtype=np.float64).reshape(-1); a = a - a.mean()
-    b = np.asarray(f, dtype=np.float64).reshape(-1); b = b - b.mean()
-    return float(np.linalg.norm(a - b) / np.linalg.norm(b))
+def rmse(fhat, f):
+    """Standard RMSE = sqrt(mean((fhat - f)^2)) = ||fhat - f|| / sqrt(N). No demeaning."""
+    a = np.asarray(fhat, dtype=np.float64).reshape(-1)
+    b = np.asarray(f, dtype=np.float64).reshape(-1)
+    return float(np.linalg.norm(a - b) / math.sqrt(b.size))
 
 
 def peak_rss_gb():
@@ -159,7 +160,7 @@ def fit_efgp(x, y, f, xe, fe):
     var = model.kernel.get_hyper('variance')
     noise = float(model._gp_params.sig2)
     return {"t_learn": t_learn, "t_predict": t_predict, "t_total": t_learn + t_predict,
-            "nrmse": nrmse(mean.detach().numpy(), fe.numpy()), "ls": ls, "var": var, "noise": noise}
+            "rmse": rmse(mean.detach().numpy(), fe.numpy()), "ls": ls, "var": var, "noise": noise}
 
 
 def _predict_gpytorch(model, likelihood, xe):
@@ -184,7 +185,7 @@ def fit_sgpr_m(x, y, f, xe, fe, m):
     t_predict = time.time() - t1
     h = res['history']
     return {"t_learn": t_learn, "t_predict": t_predict, "t_total": t_learn + t_predict,
-            "nrmse": nrmse(mean.numpy(), fe.numpy()),
+            "rmse": rmse(mean.numpy(), fe.numpy()),
             "ls": h['lengthscale'][-1], "var": h['outputscale'][-1], "noise": h['noise'][-1]}
 
 
@@ -201,7 +202,7 @@ def fit_ski(x, y, f, xe, fe):
     t_predict = time.time() - t1
     h = res['history']
     return {"t_learn": t_learn, "t_predict": t_predict, "t_total": t_learn + t_predict,
-            "nrmse": nrmse(mean.numpy(), fe.numpy()), "grid_size": res.get("grid_size"),
+            "rmse": rmse(mean.numpy(), fe.numpy()), "grid_size": res.get("grid_size"),
             "ls": h['lengthscale'][-1], "var": h['outputscale'][-1], "noise": h['noise'][-1]}
 
 

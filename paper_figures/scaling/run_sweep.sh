@@ -84,7 +84,8 @@ order={"efgp":0,"sgpr49":1,"sgpr1024":2,"ski":3}; res.sort(key=lambda r:(order.g
 print("\nFINAL RESULTS:")
 for r in res:
     if r.get("status")=="ok":
-        print(f"  {r['method']:9} {r['T']:>9,}  ok    t={r['time']:.2f}s  nrmse={r['nrmse']:.4f}  "
+        _e=r.get("rmse", r.get("nrmse"))
+        print(f"  {r['method']:9} {r['T']:>9,}  ok    t={r['time']:.2f}s  rmse={_e:.5f}  "
               f"peakRSS={r.get('peak_rss_gb',0):.1f}GB  minAvail={r.get('min_avail_gb')}  "
               f"swapDelta={r.get('swap_delta_mb')}MB")
     else:

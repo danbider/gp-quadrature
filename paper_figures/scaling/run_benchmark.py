@@ -76,7 +76,7 @@ CONFIG = {
                        "avail_ram floor + rss cap are last-resort guards",
     "true_ls": 0.05, "true_var": 1.0, "true_noise": 0.01, "d": 2,
     "init_ls": 0.3, "init_var": 0.5, "init_noise": 0.3,
-    "max_iters": 50, "metric": "latent nRMSE",
+    "max_iters": 50, "metric": "latent RMSE = ||fhat-f||/sqrt(N) at held-out test points",
     "eval": "test", "n_test": 50_000, "test_seed": 999, "rff_seed": 12345,
     "time_includes_prediction": True,
     "cores": CORES,
@@ -272,7 +272,7 @@ def print_table(results):
                 cell = "·"
             elif r.get("status") == "ok":
                 flag = "!" if (r.get("contention_suspected") or r.get("swap_suspected")) else ""
-                cell = f"{r['time']:.2g}s/{r['nrmse']:.3g}{flag}"
+                cell = f"{r['time']:.2g}s/{r['rmse']:.3g}{flag}"
             else:
                 cell = r.get("status", "?")
             row += cell.rjust(w)
@@ -327,7 +327,7 @@ def main():
                     print(f"[ ok ] {method} T={T:,}  t={rec['time']:.2f}s "
                           f"(learn={rec.get('t_learn', float('nan')):.2f}+"
                           f"pred={rec.get('t_predict', float('nan')):.2f})  "
-                          f"nrmse={rec['nrmse']:.4f}  reps={rec.get('n_reps', 1)}  "
+                          f"rmse={rec['rmse']:.5f}  reps={rec.get('n_reps', 1)}  "
                           f"peakRSS={rec.get('peak_rss_gb', 0):.1f}GB{flag}", flush=True)
                 else:
                     print(f"[{s:^7}] {method} T={T:,}  {rec.get('error', '')}", flush=True)

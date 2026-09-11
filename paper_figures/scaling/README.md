@@ -8,9 +8,10 @@ panel **D** of Figure 1 in the paper.
 Two things are measured per fit:
 1. **Wall-clock** for hyperparameter learning (50 Adam iterations, Type-II MLE) **plus
    posterior-mean prediction at the held-out test points** — both are inside the timer.
-2. **Latent-recovery accuracy**: normalized RMSE of the predicted posterior mean against
-   the *true* latent field `f`, evaluated at **held-out test points** (not training
-   points). Both series are demeaned before the ratio (`nrmse` in `worker.py`).
+2. **Latent-recovery accuracy**: standard RMSE of the predicted posterior mean against
+   the *true* latent field `f`, `RMSE = ||fhat - f|| / sqrt(N)` (no demeaning, no
+   normalization), evaluated at **held-out test points** (not training points)
+   (`rmse` in `worker.py`).
 
 ## Files
 
@@ -37,7 +38,7 @@ Run everything with the project interpreter:
 - Targets: `y = f + ε`, `ε ~ N(0, 0.01)`, seed 1.
 - **Test set**: 50,000 points `Uniform([0,1]²)`, `TEST_SEED=999`, disjoint from training,
   **the same points for every (method, n)**; true `f` there comes from the same RFF
-  realization. Recovery nRMSE is measured on these points.
+  realization. Recovery RMSE is measured on these points.
 
 > **Why RFF does not favor EFGP.** RFF draws *random* frequencies (Monte-Carlo from the
 > spectral density); EFGP uses a *deterministic equispaced quadrature grid* of
@@ -133,7 +134,7 @@ Tunable via env vars: `BENCH_THREADS`, `BENCH_MAX_ITERS`, `BENCH_NEVAL`, `BENCH_
       "time": 0.51,            // median t_total (learning + prediction) — plotted on x
       "t_learn": 0.47, "t_predict": 0.04, "t_total": 0.51,
       "sec_all": [0.51, 0.52, 0.50], "sec_median": 0.51, "sec_spread": 0.02, "n_reps": 3,
-      "nrmse": 0.0027,         // latent recovery at TEST points — plotted on y
+      "rmse": 0.0027,          // latent-recovery RMSE at TEST points — plotted on y
       "ls": 0.05, "var": 1.0, "noise": 0.01,
       "peak_rss_gb": 0.8, "max_load1": 7.9, "min_avail_gb": 9.1,
       "swap_delta_mb": 0.0, "swap_suspected": false, "contention_suspected": false

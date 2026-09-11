@@ -12,8 +12,8 @@ scratch/fig1_compact_v2.py two-file split into one file). Layout:
 Panel D reads the scaling benchmark results from  scaling/scaling_data.json
 (regenerate those with  paper_figures/scaling/run_benchmark.py  -- see
 paper_figures/scaling/README.md).  The x-axis is wall-clock for hyperparameter
-learning (50 iters) PLUS posterior prediction; the y-axis is latent-recovery nRMSE
-measured at held-out TEST points (not training points).
+learning (50 iters) PLUS posterior prediction; the y-axis is latent-recovery RMSE
+(||fhat-f||/sqrt(N)) measured at held-out TEST points (not training points).
 
 Output ->  <repo>/fig1_compact_v2.png   (referenced by the paper's main.tex, Fig 1).
 Run:  ~/myenv/bin/python paper_figures/fig1_overview.py    (from anywhere)
@@ -290,8 +290,9 @@ def panel_D(fig):
     for m in ("efgp", "ski", "sgpr1024", "sgpr49"):
         recs = by.get(m, []); lab, col, mk = _STYLE[m]
         ok = [r for r in recs if r.get("status") == "ok"]; hero = (m == "efgp")
+        _err = lambda r: r.get("rmse", r.get("nrmse"))   # 'rmse' (current) or legacy 'nrmse'
         if ok:
-            ts = [r["time"] for r in ok]; er = [r["nrmse"] for r in ok]
+            ts = [r["time"] for r in ok]; er = [_err(r) for r in ok]
             ax.plot(ts, er, "-", color=col, lw=2.1 if hero else 1.3,
                     alpha=0.95 if hero else 0.8, zorder=6 if hero else 4, label=lab)
             ax.scatter(ts, er, s=32, marker=mk, color=col, edgecolors="white",
@@ -299,7 +300,7 @@ def panel_D(fig):
             for r in ok:
                 dx, dy, ha = (EFF.get(r["T"], _EFF_DEFAULT) if hero
                               else NOFF.get(m, _NOFF_DEFAULT))
-                ax.annotate(_tlab(r["T"]), (r["time"], r["nrmse"]), textcoords="offset points",
+                ax.annotate(_tlab(r["T"]), (r["time"], _err(r)), textcoords="offset points",
                             xytext=(dx, dy), ha=ha, va="center", fontsize=6.0, color="#666", zorder=8)
             drop = next((r for r in recs if r.get("status") in _DROP), None)
             if drop is not None:
@@ -315,7 +316,7 @@ def panel_D(fig):
         axis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
         axis.set_minor_formatter(mticker.NullFormatter())
     ax.set_xlabel("learning + prediction wall-clock (s)", fontsize=ST.FS_LABEL, labelpad=2.0)
-    ax.set_ylabel("recovery error  (nRMSE)", fontsize=ST.FS_LABEL, labelpad=2.0)
+    ax.set_ylabel("recovery error  (RMSE)", fontsize=ST.FS_LABEL, labelpad=2.0)
     ax.tick_params(labelsize=7.2, pad=2.0)
     ax.grid(alpha=0.22, which="both", lw=0.4)
     # 'better' direction cross: two charcoal arrows pointing at the EFGP corner.
