@@ -92,7 +92,7 @@ CONFIG = {
                                    "given Toeplitz structure + noise floor + loose CG tol)",
             "interpolation": "cubic (order 4)", "optimizer": "Adam", "lr": 0.3, "dtype": "float32"},
     "sgpr": {"num_inducing": [49, 1024], "learn_inducing_locations": True,
-             "optimizer": "Adam", "lr": 0.1, "dtype": "float64"},
+             "optimizer": "Adam", "lr": 0.3, "dtype": "float64"},
 }
 
 

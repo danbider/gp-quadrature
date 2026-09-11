@@ -176,7 +176,7 @@ def _predict_gpytorch(model, likelihood, xe):
 def fit_sgpr_m(x, y, f, xe, fe, m):
     from utils.sgpr import fit_sgpr
     t0 = time.time()
-    res = fit_sgpr(x, y, kernel='SE', num_inducing=m, max_iters=MAX_ITERS, lr=0.1,
+    res = fit_sgpr(x, y, kernel='SE', num_inducing=m, max_iters=MAX_ITERS, lr=0.3,
                    init_lengthscale=INIT_LS, init_outputscale=INIT_VAR, init_noise=INIT_NOISE,
                    dtype=torch.float64, verbose=False)
     t_learn = time.time() - t0

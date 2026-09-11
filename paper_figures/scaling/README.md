@@ -89,7 +89,8 @@ All methods: 2-D SE kernel, 50 optimizer iterations, Type-II MLE. Same input dat
 ### SGPR (`utils.sgpr.fit_sgpr`, Titsias VFE via `InducingPointKernel`)
 - Two arms: `m = 49` and `m = 1024` inducing points, locations learned, init = random
   training subset (`inducing_seed=0`).
-- Optimizer: Adam, `lr = 0.1`; dtype float64; `ZeroMean`, `ScaleKernel(RBFKernel)`.
+- Optimizer: Adam, `lr = 0.3`; dtype float64; `ZeroMean`, `ScaleKernel(RBFKernel)`.
+  (lr matched to EFGP/SKI so all methods share Adam lr 0.3 / 50 iters.)
 
 ## Sweep, caps, and expected drop-outs
 
