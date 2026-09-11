@@ -87,7 +87,9 @@ CONFIG = {
             "grid_rule": "fixed; resolves lengthscale (spacing 0.01 vs ls=0.05); "
                          "= gpytorch choose_grid_size default at n=1e4",
             "cg_tolerance_train": 1.0, "eval_cg_tolerance": "0.01 (gpytorch default)",
-            "num_trace_samples": 1, "max_preconditioner_size": 15,
+            "num_trace_samples": 1, "max_preconditioner_size": 0,
+            "preconditioner_note": "disabled: ~7x slower with identical RMSE at N=1e4 (pure overhead "
+                                   "given Toeplitz structure + noise floor + loose CG tol)",
             "interpolation": "cubic (order 4)", "optimizer": "Adam", "lr": 0.3, "dtype": "float32"},
     "sgpr": {"num_inducing": [49, 1024], "learn_inducing_locations": True,
              "optimizer": "Adam", "lr": 0.1, "dtype": "float64"},

@@ -66,7 +66,12 @@ All methods: 2-D SE kernel, 50 optimizer iterations, Type-II MLE. Same input dat
 - **Grid: fixed 100×100** for all `n` (`target_grid_points=10000` →
   `round(√10000)=100`/dim). Cubic (order-4) interpolation, `use_toeplitz=True`.
 - Training `cg_tolerance = 1.0` (loose — SKI's inner CG is the cost bottleneck);
-  `max_cg_iterations = 1000`, `max_preconditioner_size = 15`, `num_trace_samples = 1`.
+  `max_cg_iterations = 1000`, `num_trace_samples = 1`.
+- `max_preconditioner_size = 0` (**preconditioner disabled**). The pivoted-Cholesky CG
+  preconditioner was measured ~7× slower at N=10⁴ with identical RMSE (and a worse
+  marginal likelihood): with the Toeplitz structure + noise floor and loose CG tol, CG
+  converges in ~1 step, so the preconditioner is pure per-iteration overhead. Disabling it
+  is the faster, charitable-to-SKI configuration.
 - Prediction: GPyTorch default `eval_cg_tolerance = 0.01` (posterior-mean solve).
 - Optimizer: Adam, `lr = 0.3`; dtype **float32**; `GaussianLikelihood`, `ConstantMean`.
 

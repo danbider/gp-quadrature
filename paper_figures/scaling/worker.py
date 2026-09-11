@@ -192,10 +192,13 @@ def fit_sgpr_m(x, y, f, xe, fe, m):
 def fit_ski(x, y, f, xe, fe):
     from utils.ski import fit_ski_gp
     t0 = time.time()
+    # max_preconditioner_size=0 disables the pivoted-Cholesky CG preconditioner: with the Toeplitz
+    # structure + noise floor and loose cg_tolerance, CG converges in ~1 step, so the preconditioner
+    # is pure overhead -- measured ~7x slower at N=10k with identical RMSE (and worse marginal lik).
     res = fit_ski_gp(x, y, kernel='SE', max_iters=MAX_ITERS, lr=0.3,
                      init_lengthscale=INIT_LS, init_outputscale=INIT_VAR, init_noise=INIT_NOISE,
                      dtype=torch.float32, num_trace_samples=J, cg_tolerance=1.0,
-                     target_grid_points=10_000, verbose=False)
+                     target_grid_points=10_000, max_preconditioner_size=0, verbose=False)
     t_learn = time.time() - t0
     t1 = time.time()
     mean = _predict_gpytorch(res['model'], res['likelihood'], xe)
