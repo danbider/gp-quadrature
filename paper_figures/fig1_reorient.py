@@ -208,8 +208,9 @@ def panel_D_plot(fig, letter, letter_x, title_x, title_y, axes_rect, arrows="ins
     for m in by:
         by[m].sort(key=lambda r: r["T"])
 
-    EFF = {10000: (0, 7.5, "center"), 100000: (0, -9.5, "center"), 250000: (0, 8, "center"),
-           500000: (6, 4, "left"), 1000000: (6, -6, "left")}
+    # EFGP points cluster tightly (~0.5-1s); fan the size labels out so they don't overlap
+    EFF = {10000: (0, 8, "center"), 100000: (-7, 0, "right"), 250000: (8, 2, "left"),
+           500000: (8, -4, "left"), 1000000: (7, -8, "left")}
     NOFF = {"sgpr49": (0, -8.5, "center"), "sgpr1024": (0, -8.5, "center"), "ski": (0, -8.5, "center")}
     _EFF_DEFAULT, _NOFF_DEFAULT = (6, 0, "left"), (0, -8.5, "center")
     _err = lambda r: r.get("rmse", r.get("nrmse"))   # 'rmse' (current) or legacy 'nrmse'
@@ -247,17 +248,17 @@ def panel_D_plot(fig, letter, letter_x, title_x, title_y, axes_rect, arrows="ins
         ax.set_ylabel("recovery error  (RMSE)", fontsize=ST.FS_LABEL, labelpad=2.0)
         ax.tick_params(labelsize=7.2, pad=2.0)
         ax.grid(alpha=0.22, which="both", lw=0.4)
-        aprops = dict(arrowstyle="-|>", color=gr, lw=1.4)
-        # 'faster' -> horizontal, in the bottom margin BELOW the x-axis label, pointing left
-        ax.annotate("", xy=(0.30, -0.255), xytext=(0.70, -0.255), xycoords="axes fraction",
+        aprops = dict(arrowstyle="-|>", color=gr, lw=1.5)
+        # long left-pointing arrow spanning the x-axis, hugging just below the x-axis label
+        ax.annotate("", xy=(0.06, -0.165), xytext=(0.94, -0.165), xycoords="axes fraction",
                     textcoords="axes fraction", arrowprops=aprops, annotation_clip=False, zorder=10)
-        ax.text(0.50, -0.245, "faster", transform=ax.transAxes, fontsize=7.6, color=gr,
-                style="italic", ha="center", va="bottom", clip_on=False, zorder=10)
-        # 'more accurate' -> vertical, in the left margin LEFT of the y-axis label, pointing down
-        ax.annotate("", xy=(-0.235, 0.30), xytext=(-0.235, 0.70), xycoords="axes fraction",
+        ax.text(0.50, -0.235, "faster", transform=ax.transAxes, fontsize=8.0, color=gr,
+                style="italic", ha="center", va="center", clip_on=False, zorder=10)
+        # long down-pointing arrow spanning the y-axis, hugging just left of the y-axis label
+        ax.annotate("", xy=(-0.15, 0.06), xytext=(-0.15, 0.94), xycoords="axes fraction",
                     textcoords="axes fraction", arrowprops=aprops, annotation_clip=False, zorder=10)
-        ax.text(-0.245, 0.50, "more accurate", transform=ax.transAxes, fontsize=7.6, color=gr,
-                style="italic", rotation=90, ha="right", va="center", clip_on=False, zorder=10)
+        ax.text(-0.215, 0.50, "more accurate", transform=ax.transAxes, fontsize=8.0, color=gr,
+                style="italic", rotation=90, ha="center", va="center", clip_on=False, zorder=10)
     else:
         ax.set_xlabel("learning + prediction wall-clock (s)", fontsize=ST.FS_LABEL, labelpad=2.0)
         ax.set_ylabel("recovery error  (RMSE)", fontsize=ST.FS_LABEL, labelpad=2.0)
@@ -336,11 +337,10 @@ def _trunc_glyph(fig, rect):
     xmax = 2.4
     ax.fill_between(xi[np.abs(xi) > xmax], 0, khat(xi[np.abs(xi) > xmax]),
                     color=COL["red"], alpha=0.30)
-    # equispaced grid ALWAYS includes the zero frequency (DC), so 0 is a node
+    # equispaced grid ALWAYS includes the zero frequency (DC), so 0 is a node (grid centered on 0)
     nodes = np.arange(-2.4, 2.41, 0.6)
     mk, sl, bl = ax.stem(nodes, khat(nodes), basefmt=" ")
     plt.setp(sl, color=COL["space"], lw=0.8); plt.setp(mk, color=COL["space"], ms=2.0)
-    ax.plot([0.0], [khat(0.0)], marker="o", ms=3.6, color=COL["four"], zorder=6)  # highlight DC node
     ax.axvline(xmax, color=COL["red"], lw=0.6, ls=":"); ax.axvline(-xmax, color=COL["red"], lw=0.6, ls=":")
     ax.set_ylim(-0.05, 1.15); ax.set_xlim(-3.4, 3.4); ax.set_xticks([]); ax.set_yticks([])
     for sp in ax.spines.values(): sp.set_visible(False)
@@ -482,9 +482,9 @@ def build_flow_v2_altarrows():
     for (gfn, lab, hero), cy in zip(steps, rows_B):
         _boxc(fig, 0.335, cy, BH2, gfn, lab, hero=hero, fs=6.6)
 
-    # slightly inset axes on the left/bottom so the outside arrows + labels have margin room
+    # inset axes on the left/bottom so the outside direction-arrows + labels have clear margin room
     panel_D_plot(fig, "C", letter_x=0.490, title_x=0.517, title_y=0.95,
-                 axes_rect=[0.545, 0.175, 0.420, 0.605], arrows="outside")
+                 axes_rect=[0.590, 0.225, 0.375, 0.555], arrows="outside")
     return fig
 
 
