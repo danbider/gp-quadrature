@@ -197,7 +197,7 @@ _DROP = {"oom": "OOM", "timeout": "time-out", "error": "OOM"}
 def _tlab(n):
     return f"{n // 1000}k" if n < 1_000_000 else f"{n // 1_000_000}M"
 
-def panel_D_plot(fig, letter, letter_x, title_x, title_y, axes_rect):
+def panel_D_plot(fig, letter, letter_x, title_x, title_y, axes_rect, arrows="inside"):
     fig_text(fig, letter_x, title_y, letter, fs=FS_LETTER, b=True, ha="left")
     fig_text(fig, title_x, title_y, "Faster and more accurate", fs=FS_TITLE, b=True, ha="left")
     ax = fig.add_axes(axes_rect); ax.set_zorder(3)
@@ -240,17 +240,35 @@ def panel_D_plot(fig, letter, letter_x, title_x, title_y, axes_rect):
     for axis in (ax.xaxis, ax.yaxis):
         axis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
         axis.set_minor_formatter(mticker.NullFormatter())
-    ax.set_xlabel("learning + prediction wall-clock (s)", fontsize=ST.FS_LABEL, labelpad=2.0)
-    ax.set_ylabel("recovery error  (RMSE)", fontsize=ST.FS_LABEL, labelpad=2.0)
-    ax.tick_params(labelsize=7.2, pad=2.0)
-    ax.grid(alpha=0.22, which="both", lw=0.4)
-    cx0, cy0 = 2.5, 0.15
     gr = "#333333"
-    ax.annotate("", xy=(0.5, cy0), xytext=(cx0, cy0), arrowprops=dict(arrowstyle="-|>", color=gr, lw=1.3))
-    ax.annotate("", xy=(cx0, 0.022), xytext=(cx0, cy0), arrowprops=dict(arrowstyle="-|>", color=gr, lw=1.3))
-    ax.text(1.0, 0.19, "faster", fontsize=7.6, color=gr, style="italic", ha="center", va="bottom")
-    ax.text(3.2, 0.057, "more accurate", fontsize=7.6, color=gr, style="italic",
-            rotation=90, ha="left", va="center")
+    if arrows == "outside":
+        # axis labels stay near the frame; the direction arrows sit FURTHER out in the clear margin
+        ax.set_xlabel("learning + prediction wall-clock (s)", fontsize=ST.FS_LABEL, labelpad=2.0)
+        ax.set_ylabel("recovery error  (RMSE)", fontsize=ST.FS_LABEL, labelpad=2.0)
+        ax.tick_params(labelsize=7.2, pad=2.0)
+        ax.grid(alpha=0.22, which="both", lw=0.4)
+        aprops = dict(arrowstyle="-|>", color=gr, lw=1.4)
+        # 'faster' -> horizontal, in the bottom margin BELOW the x-axis label, pointing left
+        ax.annotate("", xy=(0.30, -0.255), xytext=(0.70, -0.255), xycoords="axes fraction",
+                    textcoords="axes fraction", arrowprops=aprops, annotation_clip=False, zorder=10)
+        ax.text(0.50, -0.245, "faster", transform=ax.transAxes, fontsize=7.6, color=gr,
+                style="italic", ha="center", va="bottom", clip_on=False, zorder=10)
+        # 'more accurate' -> vertical, in the left margin LEFT of the y-axis label, pointing down
+        ax.annotate("", xy=(-0.235, 0.30), xytext=(-0.235, 0.70), xycoords="axes fraction",
+                    textcoords="axes fraction", arrowprops=aprops, annotation_clip=False, zorder=10)
+        ax.text(-0.245, 0.50, "more accurate", transform=ax.transAxes, fontsize=7.6, color=gr,
+                style="italic", rotation=90, ha="right", va="center", clip_on=False, zorder=10)
+    else:
+        ax.set_xlabel("learning + prediction wall-clock (s)", fontsize=ST.FS_LABEL, labelpad=2.0)
+        ax.set_ylabel("recovery error  (RMSE)", fontsize=ST.FS_LABEL, labelpad=2.0)
+        ax.tick_params(labelsize=7.2, pad=2.0)
+        ax.grid(alpha=0.22, which="both", lw=0.4)
+        cx0, cy0 = 2.5, 0.15
+        ax.annotate("", xy=(0.5, cy0), xytext=(cx0, cy0), arrowprops=dict(arrowstyle="-|>", color=gr, lw=1.3))
+        ax.annotate("", xy=(cx0, 0.022), xytext=(cx0, cy0), arrowprops=dict(arrowstyle="-|>", color=gr, lw=1.3))
+        ax.text(1.0, 0.19, "faster", fontsize=7.6, color=gr, style="italic", ha="center", va="bottom")
+        ax.text(3.2, 0.057, "more accurate", fontsize=7.6, color=gr, style="italic",
+                rotation=90, ha="left", va="center")
     leg = ax.legend(loc="upper right", bbox_to_anchor=(0.998, 0.996), ncol=2, fontsize=5.9,
                     frameon=True, edgecolor="#bbbbbb", facecolor="white", framealpha=0.95,
                     handlelength=0.85, handletextpad=0.3, columnspacing=0.65,
@@ -299,7 +317,7 @@ def build_v2():
 from matplotlib.patches import FancyBboxPatch
 
 
-def header2(fig, x, y, letter, lines, dy=0.052):
+def header2(fig, x, y, letter, lines, dy=0.036):
     """Panel letter + a one- or two-line title, first line on baseline y."""
     fig_text(fig, x, y, letter, fs=FS_LETTER, b=True, ha="left")
     tx = x + 0.027
@@ -318,9 +336,11 @@ def _trunc_glyph(fig, rect):
     xmax = 2.4
     ax.fill_between(xi[np.abs(xi) > xmax], 0, khat(xi[np.abs(xi) > xmax]),
                     color=COL["red"], alpha=0.30)
-    nodes = np.arange(-2.1, 2.11, 0.6)
+    # equispaced grid ALWAYS includes the zero frequency (DC), so 0 is a node
+    nodes = np.arange(-2.4, 2.41, 0.6)
     mk, sl, bl = ax.stem(nodes, khat(nodes), basefmt=" ")
     plt.setp(sl, color=COL["space"], lw=0.8); plt.setp(mk, color=COL["space"], ms=2.0)
+    ax.plot([0.0], [khat(0.0)], marker="o", ms=3.6, color=COL["four"], zorder=6)  # highlight DC node
     ax.axvline(xmax, color=COL["red"], lw=0.6, ls=":"); ax.axvline(-xmax, color=COL["red"], lw=0.6, ls=":")
     ax.set_ylim(-0.05, 1.15); ax.set_xlim(-3.4, 3.4); ax.set_xticks([]); ax.set_yticks([])
     for sp in ax.spines.values(): sp.set_visible(False)
@@ -444,9 +464,34 @@ def build_flow_v2():
     return fig
 
 
+def build_flow_v2_altarrows():
+    """Same as build_flow_v2 but with the 'faster' / 'more accurate' arrows drawn OUTSIDE the
+    panel-C frame (in the outer margin), per collaborator request."""
+    global ASP
+    figsize = (ST.FIG_W, 4.1)
+    ASP = figsize[1] / figsize[0]
+    fig = plt.figure(figsize=figsize); fig.patch.set_facecolor("white")
+
+    BH = 0.190; rows = (0.764, 0.486, 0.208)
+    _draw_A(fig, 0.120, rows, BH)
+
+    header2(fig, 0.245, 0.95, "B", ["Efficient computation", "in the EFGP basis"])
+    BH2 = 0.220; rows_B = (0.630, 0.270)
+    steps = [(_trunc_glyph, "equispaced\napprox.", True),
+             (_toep_glyph, "Toeplitz\noperator", False)]
+    for (gfn, lab, hero), cy in zip(steps, rows_B):
+        _boxc(fig, 0.335, cy, BH2, gfn, lab, hero=hero, fs=6.6)
+
+    # slightly inset axes on the left/bottom so the outside arrows + labels have margin room
+    panel_D_plot(fig, "C", letter_x=0.490, title_x=0.517, title_y=0.95,
+                 axes_rect=[0.545, 0.175, 0.420, 0.605], arrows="outside")
+    return fig
+
+
 if __name__ == "__main__":
     f1 = build_v1();      ST.save(f1, str(ROOT / "fig1_reorient_v1_AD"));    plt.close(f1)
     f2 = build_v2();      ST.save(f2, str(ROOT / "fig1_reorient_v2_ABD"));   plt.close(f2)
     f3 = build_flow_v1(); ST.save(f3, str(ROOT / "fig1_reorient_flow_v1")); plt.close(f3)
     f4 = build_flow_v2(); ST.save(f4, str(ROOT / "fig1_reorient_flow_v2")); plt.close(f4)
+    f5 = build_flow_v2_altarrows(); ST.save(f5, str(ROOT / "fig1_reorient_flow_v2_altarrows")); plt.close(f5)
     print("done")
