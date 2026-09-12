@@ -24,8 +24,11 @@ if [[ "${RESUME_ONLY:-0}" != "1" ]]; then
   rm -f "$OUT"                 # fresh run
 fi
 
-# uniform settings for EVERY fit; swap-ceiling OFF (rely on RSS cap + fast poll)
-export BENCH_RESUME=1 BENCH_RSS_LIMIT_GB=14 BENCH_POLL_S=1 BENCH_LOAD_GATE=1.5 BENCH_COOLDOWN_S=15
+# uniform settings for EVERY fit; swap-ceiling OFF (rely on RSS cap + fast poll).
+# RSS cap 15GB (of 17): high enough that the memory-heaviest fit that can still fit on a quiesced
+# laptop (SGPR-1024 @500k ~14GB) gets a real attempt; the driver kills a worker cleanly above it
+# (before a system OOM), and run_phase self-heals if a fit ever crashes the driver.
+export BENCH_RESUME=1 BENCH_RSS_LIMIT_GB=15 BENCH_POLL_S=1 BENCH_LOAD_GATE=1.5 BENCH_COOLDOWN_S=15
 
 missing () {  # $1=methods csv  $2=sizes csv  -> exit 1 if any (method,T) missing from OUT
   $PY - "$OUT" "$1" "$2" <<'PYEOF'
