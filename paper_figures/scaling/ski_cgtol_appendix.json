@@ -1,0 +1,38 @@
+{
+  "setup": {
+    "method": "SKI",
+    "n": 10000,
+    "grid": "100x100",
+    "max_preconditioner_size": 0,
+    "max_iters": 50,
+    "lr": 0.3,
+    "eval_cg_tolerance": 0.01,
+    "metric": "RMSE = ||fhat-f||/sqrt(N) at test points"
+  },
+  "rows": [
+    {
+      "cg_tol": 1.0,
+      "learn_s": 15.488086938858032,
+      "rmse": 0.02756317976691713,
+      "final_loss": -0.6513950228691101
+    },
+    {
+      "cg_tol": 0.1,
+      "learn_s": 36.16993594169617,
+      "rmse": 0.027768086111172718,
+      "final_loss": -0.6702434420585632
+    },
+    {
+      "cg_tol": 0.01,
+      "learn_s": 64.41730308532715,
+      "rmse": 0.02757921136577579,
+      "final_loss": -0.6302018761634827
+    },
+    {
+      "cg_tol": 0.001,
+      "learn_s": 90.30260109901428,
+      "rmse": 0.02813125143814429,
+      "final_loss": -0.6643370389938354
+    }
+  ]
+}
